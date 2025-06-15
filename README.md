@@ -5,12 +5,14 @@ A flexible and feature-rich logging library for Zig projects.
 ## Features
 
 - Multiple log levels (debug, info, warn, error)
+- Optional log level display (disabled by default for cleaner output)
 - Customizable colors for log output
 - File logging support
-- Timestamp support
-- Tag-based filtering
+- Timestamp support (per-logger and global)
+- Tag-based filtering with wildcards and exclusions
 - Block logging for grouping related logs
 - Hexdump functionality
+- Thread-safe logging
 
 ## Installation
 
@@ -59,7 +61,12 @@ const custom_log = logger.new(.{
     .tag = "custom",
     .color = .blue,
     .show_timestamp = true,
+    .show_level = true,  // Show log levels (INFO, WARN, ERROR, DEBUG)
 });
+
+// Global settings
+logger.setGlobalTimestamp(true);  // Enable timestamps for all loggers
+logger.setGlobalLevel(true);      // Enable log levels for all loggers
 
 // Block logging
 const block = custom_log.block("MyBlock");
@@ -69,6 +76,36 @@ block.close("Block completed");
 // Hexdump
 const data = "Hello, World!";
 custom_log.hexdump(data, .{});
+```
+
+## Log Level Display
+
+By default, log levels (INFO, WARN, ERROR, DEBUG) are **not** displayed in the output for cleaner logs. You can enable them per logger or globally:
+
+```zig
+// Default behavior - no levels shown
+const log = logger.new(.{ .tag = "app" });
+log.info("Starting application", .{});
+// Output: [app]: Starting application
+
+// Enable levels for individual logger
+const debug_log = logger.new(.{ .tag = "debug", .show_level = true });
+debug_log.info("Debug information", .{});
+// Output: [debug] INFO : Debug information
+
+// Enable levels globally for all loggers
+logger.setGlobalLevel(true);
+log.info("Now showing levels", .{});
+// Output: [app] INFO : Now showing levels
+
+// Combine with timestamps
+const full_log = logger.new(.{
+    .tag = "full",
+    .show_timestamp = true,
+    .show_level = true
+});
+full_log.warn("Warning message", .{});
+// Output: [1234567890][full] WARN : Warning message
 ```
 
 ## Environment Variables

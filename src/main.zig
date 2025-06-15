@@ -20,6 +20,7 @@ pub const LogOptions = struct {
     color: ?LogColor = null,
     file: ?std.fs.File = null,
     show_timestamp: bool = false,
+    show_level: bool = false,
 };
 
 // Centralized logging backend - handles all I/O and synchronization
@@ -27,6 +28,7 @@ pub const LogBackend = struct {
     mutex: std.Thread.Mutex = .{},
     file: ?std.fs.File = null,
     show_global_timestamp: bool = false,
+    show_global_level: bool = false,
     filter: ?std.BoundedArray([]const u8, 16) = null,
 
     fn ensureFilterLoaded(self: *LogBackend) void {
@@ -131,7 +133,7 @@ pub const LogBackend = struct {
         return std.mem.eql(u8, pattern, tag);
     }
 
-    fn writeLog(self: *LogBackend, level: LogLevel, tag: []const u8, color: ?LogColor, show_timestamp: bool, message: []const u8) void {
+    fn writeLog(self: *LogBackend, level: LogLevel, tag: []const u8, color: ?LogColor, show_timestamp: bool, show_level: bool, message: []const u8) void {
         if (!self.shouldLog(level, tag)) return;
 
         self.mutex.lock();
@@ -154,10 +156,17 @@ pub const LogBackend = struct {
             break :blk slice[0 .. slice.len - 1]; // remove null terminator
         } else ""[0..0];
 
-        out.print("{s}{s}[{s}] {s}: {s}{s}\n", .{ ts_prefix, actual_color, tag, label, message, reset }) catch {};
-
-        if (self.file) |file| {
-            file.writer().print("{s}[{s}] {s}: {s}\n", .{ ts_prefix, tag, label, message }) catch {};
+        const show_lvl = show_level or self.show_global_level;
+        if (show_lvl) {
+            out.print("{s}{s}[{s}] {s}: {s}{s}\n", .{ ts_prefix, actual_color, tag, label, message, reset }) catch {};
+            if (self.file) |file| {
+                file.writer().print("{s}[{s}] {s}: {s}\n", .{ ts_prefix, tag, label, message }) catch {};
+            }
+        } else {
+            out.print("{s}{s}[{s}]: {s}{s}\n", .{ ts_prefix, actual_color, tag, message, reset }) catch {};
+            if (self.file) |file| {
+                file.writer().print("{s}[{s}]: {s}\n", .{ ts_prefix, tag, message }) catch {};
+            }
         }
     }
 
@@ -257,6 +266,10 @@ pub fn setGlobalTimestamp(enabled: bool) void {
     backend.show_global_timestamp = enabled;
 }
 
+pub fn setGlobalLevel(enabled: bool) void {
+    backend.show_global_level = enabled;
+}
+
 pub fn new(config: LogOptions) Logger {
     return Logger{ .config = config };
 }
@@ -267,31 +280,31 @@ pub const Logger = struct {
     pub fn info(self: Logger, comptime fmt: []const u8, args: anytype) void {
         var buf: [1024]u8 = undefined;
         const message = std.fmt.bufPrint(&buf, fmt, args) catch "FORMAT_ERROR";
-        backend.writeLog(.info, self.config.tag, self.config.color, self.config.show_timestamp, message);
+        backend.writeLog(.info, self.config.tag, self.config.color, self.config.show_timestamp, self.config.show_level, message);
     }
 
     pub fn warn(self: Logger, comptime fmt: []const u8, args: anytype) void {
         var buf: [1024]u8 = undefined;
         const message = std.fmt.bufPrint(&buf, fmt, args) catch "FORMAT_ERROR";
-        backend.writeLog(.warn, self.config.tag, self.config.color, self.config.show_timestamp, message);
+        backend.writeLog(.warn, self.config.tag, self.config.color, self.config.show_timestamp, self.config.show_level, message);
     }
 
     pub fn err(self: Logger, comptime fmt: []const u8, args: anytype) void {
         var buf: [1024]u8 = undefined;
         const message = std.fmt.bufPrint(&buf, fmt, args) catch "FORMAT_ERROR";
-        backend.writeLog(.err, self.config.tag, self.config.color, self.config.show_timestamp, message);
+        backend.writeLog(.err, self.config.tag, self.config.color, self.config.show_timestamp, self.config.show_level, message);
     }
 
     pub fn dbg(self: Logger, comptime fmt: []const u8, args: anytype) void {
         var buf: [1024]u8 = undefined;
         const message = std.fmt.bufPrint(&buf, fmt, args) catch "FORMAT_ERROR";
-        backend.writeLog(.debug, self.config.tag, self.config.color, self.config.show_timestamp, message);
+        backend.writeLog(.debug, self.config.tag, self.config.color, self.config.show_timestamp, self.config.show_level, message);
     }
 
     pub fn fatal(self: Logger, comptime fmt: []const u8, args: anytype) noreturn {
         var buf: [1024]u8 = undefined;
         const message = std.fmt.bufPrint(&buf, fmt, args) catch "FORMAT_ERROR";
-        backend.writeLog(.err, self.config.tag, self.config.color, self.config.show_timestamp, message);
+        backend.writeLog(.err, self.config.tag, self.config.color, self.config.show_timestamp, self.config.show_level, message);
         std.process.exit(1);
     }
 

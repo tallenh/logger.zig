@@ -268,3 +268,25 @@ test "NOT operator filtering" {
 
     std.debug.print("NOT operator filtering test completed\n", .{});
 }
+
+test "show level functionality" {
+    std.debug.print("Testing show level functionality...\n", .{});
+
+    // Test individual logger show_level setting
+    const default_log = logger.new(.{ .tag = "test_default" });
+    const level_log = logger.new(.{ .tag = "test_level", .show_level = true });
+
+    // These should work without throwing errors
+    default_log.info("message without level", .{});
+    level_log.info("message with level", .{});
+
+    // Test global level setting
+    logger.setGlobalLevel(true);
+    default_log.info("message with global level", .{});
+
+    logger.setGlobalLevel(false);
+    default_log.info("message without global level", .{});
+    level_log.info("message with individual level", .{});
+
+    std.debug.print("Show level functionality test completed\n", .{});
+}

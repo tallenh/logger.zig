@@ -198,6 +198,8 @@ fn logWithOptions(
     comptime fmt: []const u8,
     args: anytype,
 ) void {
+    // In release mode, only compile error logging
+    if (builtin.mode != .Debug and level != .err) return;
     if (!tagMatches(options.tag)) return;
 
     const color = if (options.color) |c| colorCode(c) else levelToColor(level);
@@ -205,7 +207,7 @@ fn logWithOptions(
     const reset = "\x1b[0m";
 
     var out = switch (level) {
-        .err => std.io.getStdErr().writer(),
+        .err => if (builtin.mode == .Debug) std.io.getStdOut().writer() else std.io.getStdErr().writer(),
         else => std.io.getStdOut().writer(),
     };
 
@@ -230,6 +232,8 @@ fn logWithOptions(
 }
 
 pub fn hexdump_impl(buf: []const u8, opts: HexdumpOptions) void {
+    // Hexdump only works in debug mode
+    if (builtin.mode != .Debug) return;
     if (!tagMatches(opts.tag)) return;
 
     const color = if (opts.color) |c| colorCode(c) else levelToColor(.debug);

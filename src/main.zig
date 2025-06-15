@@ -22,22 +22,166 @@ pub const LogOptions = struct {
     show_timestamp: bool = false,
 };
 
-pub var log_file: ?std.fs.File = null;
-pub var show_global_timestamp: bool = false;
+// Centralized logging backend - handles all I/O and synchronization
+const LogBackend = struct {
+    mutex: std.Thread.Mutex = .{},
+    file: ?std.fs.File = null,
+    show_global_timestamp: bool = false,
+    filter: ?std.BoundedArray([]const u8, 16) = null,
 
-var filter: ?std.BoundedArray([]const u8, 16) = null;
+    fn ensureFilterLoaded(self: *LogBackend) void {
+        if (self.filter != null) return;
+
+        const env = std.process.getEnvVarOwned(std.heap.page_allocator, "ZIGLOG") catch {
+            self.filter = std.BoundedArray([]const u8, 16){};
+            return;
+        };
+        defer std.heap.page_allocator.free(env);
+
+        var list = std.BoundedArray([]const u8, 16){};
+        var it = std.mem.splitSequence(u8, env, ",");
+        while (it.next()) |entry| {
+            const entry_copy = std.heap.page_allocator.dupe(u8, entry) catch continue;
+            list.append(entry_copy) catch {};
+        }
+        self.filter = list;
+    }
+
+    fn shouldLog(self: *LogBackend, level: LogLevel, tag: []const u8) bool {
+        // Build mode check
+        if (builtin.mode != .Debug and level != .err) return false;
+
+        // Tag filtering
+        self.ensureFilterLoaded();
+        if (self.filter) |f| {
+            if (f.len == 0) return true;
+            for (f.slice()) |allowed| {
+                if (std.mem.eql(u8, allowed, tag)) return true;
+            }
+            return false;
+        }
+        return true;
+    }
+
+    fn writeLog(self: *LogBackend, level: LogLevel, tag: []const u8, color: ?LogColor, show_timestamp: bool, message: []const u8) void {
+        if (!self.shouldLog(level, tag)) return;
+
+        self.mutex.lock();
+        defer self.mutex.unlock();
+
+        const actual_color = if (color) |c| colorCode(c) else levelToColor(level);
+        const label = levelToLabel(level);
+        const reset = "\x1b[0m";
+
+        var out = switch (level) {
+            .err => if (builtin.mode == .Debug) std.io.getStdOut().writer() else std.io.getStdErr().writer(),
+            else => std.io.getStdOut().writer(),
+        };
+
+        const show_ts = show_timestamp or self.show_global_timestamp;
+        const ts_prefix: []u8 = if (show_ts) blk: {
+            var buf: [32]u8 = undefined;
+            const now = std.time.timestamp();
+            const slice = std.fmt.bufPrintZ(&buf, "[{d}] ", .{now}) catch break :blk ""[0..0];
+            break :blk slice[0 .. slice.len - 1]; // remove null terminator
+        } else ""[0..0];
+
+        out.print("{s}{s}[{s}] {s}: {s}{s}\n", .{ ts_prefix, actual_color, tag, label, message, reset }) catch {};
+
+        if (self.file) |file| {
+            file.writer().print("{s}[{s}] {s}: {s}\n", .{ ts_prefix, tag, label, message }) catch {};
+        }
+    }
+
+    fn writeHexdump(self: *LogBackend, tag: []const u8, color: ?LogColor, buf: []const u8, opts: HexdumpOptions) void {
+        // Hexdump only works in debug mode
+        if (builtin.mode != .Debug) return;
+        if (!self.shouldLog(.debug, tag)) return;
+
+        self.mutex.lock();
+        defer self.mutex.unlock();
+
+        const actual_color = if (color) |c| colorCode(c) else levelToColor(.debug);
+        const reset = "\x1b[0m";
+        const label = "DEBUG";
+
+        var out = std.io.getStdOut().writer();
+
+        const start = opts.start;
+        if (start >= buf.len) return;
+        const bytes_available = buf.len - start;
+        const bytes_to_dump = if (opts.length) |len| @min(bytes_available, len) else bytes_available;
+
+        out.print("{s}[{s}] {s}: hexdump buffer length = {}{s}\n", .{
+            actual_color, tag, label, bytes_to_dump, reset,
+        }) catch {};
+
+        if (self.file) |file| {
+            file.writer().print("[{s}] {s}: hexdump buffer length = {}\n", .{
+                tag, label, bytes_to_dump,
+            }) catch {};
+        }
+
+        var offset: usize = 0;
+        while (offset < bytes_to_dump) : (offset += 16) {
+            const abs_offset = start + offset;
+            var hex_line: [80]u8 = undefined;
+            var ascii_line: [17]u8 = undefined;
+            var hex_i: usize = 0;
+            var ascii_i: usize = 0;
+
+            if (opts.decimal_offset) {
+                const slice = std.fmt.bufPrint(hex_line[hex_i..], "{d:0>8}  ", .{abs_offset}) catch continue;
+                hex_i += slice.len;
+            } else {
+                const slice = std.fmt.bufPrint(hex_line[hex_i..], "{x:0>8}  ", .{abs_offset}) catch continue;
+                hex_i += slice.len;
+            }
+
+            var i: usize = 0;
+            while (i < 16) : (i += 1) {
+                if (offset + i < bytes_to_dump) {
+                    const slice = std.fmt.bufPrint(hex_line[hex_i..], "{x:0>2} ", .{buf[start + offset + i]}) catch continue;
+                    hex_i += slice.len;
+                    const c = buf[start + offset + i];
+                    ascii_line[ascii_i] = if (c >= 0x20 and c <= 0x7e) c else '.';
+                } else {
+                    const slice = std.fmt.bufPrint(hex_line[hex_i..], "   ", .{}) catch continue;
+                    hex_i += slice.len;
+                    ascii_line[ascii_i] = ' ';
+                }
+                ascii_i += 1;
+                if (i == 7) {
+                    const slice = std.fmt.bufPrint(hex_line[hex_i..], " ", .{}) catch continue;
+                    hex_i += slice.len;
+                }
+            }
+            ascii_line[ascii_i] = 0;
+
+            out.print("{s}{s} |{s}|{s}\n", .{ actual_color, hex_line[0..hex_i], ascii_line[0..ascii_i], reset }) catch {};
+
+            if (self.file) |file| {
+                file.writer().print("{s} |{s}|\n", .{ hex_line[0..hex_i], ascii_line[0..ascii_i] }) catch {};
+            }
+        }
+    }
+};
+
+// Global backend instance
+var backend: LogBackend = .{};
 
 pub const HexdumpOptions = struct {
-    tag: []const u8,
-    color: ?LogColor,
-    file: ?std.fs.File,
     decimal_offset: bool = false,
     length: ?usize = null,
     start: usize = 0,
 };
 
 pub fn setLogFile(file: std.fs.File) void {
-    log_file = file;
+    backend.file = file;
+}
+
+pub fn setGlobalTimestamp(enabled: bool) void {
+    backend.show_global_timestamp = enabled;
 }
 
 pub fn new(config: LogOptions) Logger {
@@ -48,40 +192,38 @@ pub const Logger = struct {
     config: LogOptions,
 
     pub fn info(self: Logger, comptime fmt: []const u8, args: anytype) void {
-        logWithOptions(.info, self.config, fmt, args);
+        var buf: [1024]u8 = undefined;
+        const message = std.fmt.bufPrint(&buf, fmt, args) catch "FORMAT_ERROR";
+        backend.writeLog(.info, self.config.tag, self.config.color, self.config.show_timestamp, message);
     }
 
     pub fn warn(self: Logger, comptime fmt: []const u8, args: anytype) void {
-        logWithOptions(.warn, self.config, fmt, args);
+        var buf: [1024]u8 = undefined;
+        const message = std.fmt.bufPrint(&buf, fmt, args) catch "FORMAT_ERROR";
+        backend.writeLog(.warn, self.config.tag, self.config.color, self.config.show_timestamp, message);
     }
 
     pub fn err(self: Logger, comptime fmt: []const u8, args: anytype) void {
-        logWithOptions(.err, self.config, fmt, args);
+        var buf: [1024]u8 = undefined;
+        const message = std.fmt.bufPrint(&buf, fmt, args) catch "FORMAT_ERROR";
+        backend.writeLog(.err, self.config.tag, self.config.color, self.config.show_timestamp, message);
     }
 
     pub fn dbg(self: Logger, comptime fmt: []const u8, args: anytype) void {
-        logWithOptions(.debug, self.config, fmt, args);
+        var buf: [1024]u8 = undefined;
+        const message = std.fmt.bufPrint(&buf, fmt, args) catch "FORMAT_ERROR";
+        backend.writeLog(.debug, self.config.tag, self.config.color, self.config.show_timestamp, message);
     }
 
     pub fn fatal(self: Logger, comptime fmt: []const u8, args: anytype) noreturn {
-        logWithOptions(.err, self.config, fmt, args);
+        var buf: [1024]u8 = undefined;
+        const message = std.fmt.bufPrint(&buf, fmt, args) catch "FORMAT_ERROR";
+        backend.writeLog(.err, self.config.tag, self.config.color, self.config.show_timestamp, message);
         std.process.exit(1);
     }
 
-    pub fn hexdump(self: Logger, buf: []const u8, opts: struct {
-        decimal_offset: bool = false,
-        length: ?usize = null,
-        start: usize = 0,
-    }) void {
-        const combined = HexdumpOptions{
-            .tag = self.config.tag,
-            .color = self.config.color,
-            .file = self.config.file,
-            .decimal_offset = opts.decimal_offset,
-            .length = opts.length,
-            .start = opts.start,
-        };
-        hexdump_impl(buf, combined);
+    pub fn hexdump(self: Logger, buf: []const u8, opts: HexdumpOptions) void {
+        backend.writeHexdump(self.config.tag, self.config.color, buf, opts);
     }
 
     pub fn block(self: Logger, label: []const u8) BlockLogger {
@@ -130,36 +272,6 @@ pub const BlockLogger = struct {
     }
 };
 
-fn ensureFilterLoaded() void {
-    if (filter != null) return;
-
-    const env = std.process.getEnvVarOwned(std.heap.page_allocator, "ZIGLOG") catch {
-        filter = std.BoundedArray([]const u8, 16){};
-        return;
-    };
-    defer std.heap.page_allocator.free(env);
-
-    var list = std.BoundedArray([]const u8, 16){};
-    var it = std.mem.splitSequence(u8, env, ",");
-    while (it.next()) |entry| {
-        // Create a copy of the entry since env will be freed
-        const entry_copy = std.heap.page_allocator.dupe(u8, entry) catch continue;
-        list.append(entry_copy) catch {};
-    }
-    filter = list;
-}
-
-fn tagMatches(tag: []const u8) bool {
-    ensureFilterLoaded();
-    if (filter == null) return true;
-    // If filter is empty (no ZIGLOG set), allow all tags
-    if (filter.?.len == 0) return true;
-    for (filter.?.slice()) |allowed| {
-        if (std.mem.eql(u8, allowed, tag)) return true;
-    }
-    return false;
-}
-
 fn colorCode(color: LogColor) []const u8 {
     return switch (color) {
         .red => "\x1b[31m",
@@ -190,114 +302,4 @@ fn levelToLabel(level: LogLevel) []const u8 {
         .warn => "WARN ",
         .err => "ERROR",
     };
-}
-
-fn logWithOptions(
-    level: LogLevel,
-    options: LogOptions,
-    comptime fmt: []const u8,
-    args: anytype,
-) void {
-    // In release mode, only compile error logging
-    if (builtin.mode != .Debug and level != .err) return;
-    if (!tagMatches(options.tag)) return;
-
-    const color = if (options.color) |c| colorCode(c) else levelToColor(level);
-    const label = levelToLabel(level);
-    const reset = "\x1b[0m";
-
-    var out = switch (level) {
-        .err => if (builtin.mode == .Debug) std.io.getStdOut().writer() else std.io.getStdErr().writer(),
-        else => std.io.getStdOut().writer(),
-    };
-
-    const show_ts = options.show_timestamp or show_global_timestamp;
-    const ts_prefix: []u8 = if (show_ts) blk: {
-        var buf: [32]u8 = undefined;
-        const now = std.time.timestamp();
-        const slice = std.fmt.bufPrintZ(&buf, "[{d}] ", .{now}) catch break :blk ""[0..0];
-        break :blk slice[0 .. slice.len - 1]; // remove null terminator
-    } else ""[0..0];
-
-    // Create a new tuple with the prefix, color, tag, label, user args, and reset
-    const full_args = .{ ts_prefix, color, options.tag, label } ++ args ++ .{reset};
-
-    out.print("{s}{s}[{s}] {s}: " ++ fmt ++ "{s}\n", full_args) catch {};
-
-    const target_file = options.file orelse log_file;
-    if (target_file) |file| {
-        const file_args = .{ ts_prefix, options.tag, label } ++ args;
-        file.writer().print("{s}[{s}] {s}: " ++ fmt ++ "\n", file_args) catch {};
-    }
-}
-
-pub fn hexdump_impl(buf: []const u8, opts: HexdumpOptions) void {
-    // Hexdump only works in debug mode
-    if (builtin.mode != .Debug) return;
-    if (!tagMatches(opts.tag)) return;
-
-    const color = if (opts.color) |c| colorCode(c) else levelToColor(.debug);
-    const reset = "\x1b[0m";
-    const label = "DEBUG";
-
-    var out = std.io.getStdOut().writer();
-
-    const start = opts.start;
-    if (start >= buf.len) return;
-    const bytes_available = buf.len - start;
-    const bytes_to_dump = if (opts.length) |len| @min(bytes_available, len) else bytes_available;
-
-    out.print("{s}[{s}] {s}: hexdump buffer length = {}{s}\n", .{
-        color, opts.tag, label, bytes_to_dump, reset,
-    }) catch {};
-
-    const target_file = opts.file orelse log_file;
-    if (target_file) |file| {
-        file.writer().print("[{s}] {s}: hexdump buffer length = {}\n", .{
-            opts.tag, label, bytes_to_dump,
-        }) catch {};
-    }
-
-    var offset: usize = 0;
-    while (offset < bytes_to_dump) : (offset += 16) {
-        const abs_offset = start + offset;
-        var hex_line: [80]u8 = undefined;
-        var ascii_line: [17]u8 = undefined;
-        var hex_i: usize = 0;
-        var ascii_i: usize = 0;
-
-        if (opts.decimal_offset) {
-            const slice = std.fmt.bufPrint(hex_line[hex_i..], "{d:0>8}  ", .{abs_offset}) catch continue;
-            hex_i += slice.len;
-        } else {
-            const slice = std.fmt.bufPrint(hex_line[hex_i..], "{x:0>8}  ", .{abs_offset}) catch continue;
-            hex_i += slice.len;
-        }
-
-        var i: usize = 0;
-        while (i < 16) : (i += 1) {
-            if (offset + i < bytes_to_dump) {
-                const slice = std.fmt.bufPrint(hex_line[hex_i..], "{x:0>2} ", .{buf[start + offset + i]}) catch continue;
-                hex_i += slice.len;
-                const c = buf[start + offset + i];
-                ascii_line[ascii_i] = if (c >= 0x20 and c <= 0x7e) c else '.';
-            } else {
-                const slice = std.fmt.bufPrint(hex_line[hex_i..], "   ", .{}) catch continue;
-                hex_i += slice.len;
-                ascii_line[ascii_i] = ' ';
-            }
-            ascii_i += 1;
-            if (i == 7) {
-                const slice = std.fmt.bufPrint(hex_line[hex_i..], " ", .{}) catch continue;
-                hex_i += slice.len;
-            }
-        }
-        ascii_line[ascii_i] = 0;
-
-        out.print("{s}{s} |{s}|{s}\n", .{ color, hex_line[0..hex_i], ascii_line[0..ascii_i], reset }) catch {};
-
-        if (target_file) |file| {
-            file.writer().print("{s} |{s}|\n", .{ hex_line[0..hex_i], ascii_line[0..ascii_i] }) catch {};
-        }
-    }
 }

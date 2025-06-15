@@ -114,3 +114,39 @@ test "hexdump options" {
     });
     std.debug.print("Hexdump options test completed\n", .{});
 }
+
+fn workerThread(thread_id: u32) void {
+    const log = logger.new(.{ .tag = std.fmt.allocPrint(std.heap.page_allocator, "T{d}", .{thread_id}) catch "THREAD" });
+    defer if (!std.mem.eql(u8, log.config.tag, "THREAD")) std.heap.page_allocator.free(log.config.tag);
+
+    var i: u32 = 0;
+    while (i < 3) : (i += 1) {
+        log.info("Message {d} from thread {d}", .{ i, thread_id });
+        if (i == 1) {
+            const data = std.fmt.allocPrint(std.heap.page_allocator, "T{d}", .{thread_id}) catch "T";
+            defer if (!std.mem.eql(u8, data, "T")) std.heap.page_allocator.free(data);
+            log.hexdump(data, .{});
+        }
+        std.time.sleep(500000); // 0.5ms
+    }
+}
+
+test "thread safety" {
+    std.debug.print("Testing thread-safe logging...\n", .{});
+
+    const num_threads = 2;
+    var threads: [num_threads]std.Thread = undefined;
+
+    for (0..num_threads) |i| {
+        threads[i] = std.Thread.spawn(.{}, workerThread, .{@as(u32, @intCast(i))}) catch |err| {
+            std.debug.print("Failed to spawn thread {}: {}\n", .{ i, err });
+            return;
+        };
+    }
+
+    for (threads) |thread| {
+        thread.join();
+    }
+
+    std.debug.print("Thread safety test completed\n", .{});
+}

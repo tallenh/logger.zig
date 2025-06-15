@@ -150,3 +150,121 @@ test "thread safety" {
 
     std.debug.print("Thread safety test completed\n", .{});
 }
+
+test "wildcard tag filtering" {
+    std.debug.print("Testing wildcard tag filtering...\n", .{});
+
+    // Test different wildcard patterns
+    const test_cases = [_]struct {
+        pattern: []const u8,
+        tag: []const u8,
+        should_match: bool,
+    }{
+        // Exact matches
+        .{ .pattern = "test", .tag = "test", .should_match = true },
+        .{ .pattern = "test", .tag = "other", .should_match = false },
+
+        // Prefix wildcards (tag*)
+        .{ .pattern = "test*", .tag = "test", .should_match = true },
+        .{ .pattern = "test*", .tag = "testing", .should_match = true },
+        .{ .pattern = "test*", .tag = "test123", .should_match = true },
+        .{ .pattern = "test*", .tag = "other", .should_match = false },
+
+        // Suffix wildcards (*tag)
+        .{ .pattern = "*test", .tag = "test", .should_match = true },
+        .{ .pattern = "*test", .tag = "mytest", .should_match = true },
+        .{ .pattern = "*test", .tag = "testing", .should_match = false },
+
+        // Contains wildcards (*tag*)
+        .{ .pattern = "*test*", .tag = "test", .should_match = true },
+        .{ .pattern = "*test*", .tag = "testing", .should_match = true },
+        .{ .pattern = "*test*", .tag = "mytest", .should_match = true },
+        .{ .pattern = "*test*", .tag = "mytesting", .should_match = true },
+        .{ .pattern = "*test*", .tag = "other", .should_match = false },
+
+        // Edge cases
+        .{ .pattern = "*", .tag = "anything", .should_match = true },
+    };
+
+    var backend = logger.LogBackend{};
+
+    for (test_cases) |case| {
+        const result = backend.tagMatches(case.tag, case.pattern);
+        if (result != case.should_match) {
+            std.debug.print("FAIL: pattern '{s}' with tag '{s}' expected {}, got {}\n", .{ case.pattern, case.tag, case.should_match, result });
+            return error.TestFailed;
+        }
+    }
+
+    std.debug.print("Wildcard tag filtering test completed\n", .{});
+}
+
+test "NOT operator filtering" {
+    std.debug.print("Testing NOT operator filtering...\n", .{});
+
+    const test_cases = [_]struct {
+        patterns: []const []const u8,
+        tag: []const u8,
+        should_match: bool,
+        description: []const u8,
+    }{
+        // Simple NOT patterns
+        .{ .patterns = &[_][]const u8{"!debug"}, .tag = "debug", .should_match = false, .description = "!debug excludes debug" },
+        .{ .patterns = &[_][]const u8{"!debug"}, .tag = "info", .should_match = true, .description = "!debug allows info" },
+
+        // NOT with wildcards
+        .{ .patterns = &[_][]const u8{"!test*"}, .tag = "testing", .should_match = false, .description = "!test* excludes testing" },
+        .{ .patterns = &[_][]const u8{"!test*"}, .tag = "production", .should_match = true, .description = "!test* allows production" },
+        .{ .patterns = &[_][]const u8{"!*debug*"}, .tag = "api_debug", .should_match = false, .description = "!*debug* excludes api_debug" },
+        .{ .patterns = &[_][]const u8{"!*debug*"}, .tag = "api_info", .should_match = true, .description = "!*debug* allows api_info" },
+
+        // Include + exclude combinations
+        .{ .patterns = &[_][]const u8{ "api*", "!api_debug" }, .tag = "api_server", .should_match = true, .description = "api*,!api_debug allows api_server" },
+        .{ .patterns = &[_][]const u8{ "api*", "!api_debug" }, .tag = "api_debug", .should_match = false, .description = "api*,!api_debug excludes api_debug" },
+        .{ .patterns = &[_][]const u8{ "api*", "!api_debug" }, .tag = "database", .should_match = false, .description = "api*,!api_debug excludes database" },
+
+        // Multiple excludes
+        .{ .patterns = &[_][]const u8{ "*", "!test*", "!*debug" }, .tag = "production", .should_match = true, .description = "*,!test*,!*debug allows production" },
+        .{ .patterns = &[_][]const u8{ "*", "!test*", "!*debug" }, .tag = "testing", .should_match = false, .description = "*,!test*,!*debug excludes testing" },
+        .{ .patterns = &[_][]const u8{ "*", "!test*", "!*debug" }, .tag = "api_debug", .should_match = false, .description = "*,!test*,!*debug excludes api_debug" },
+
+        // Complex scenarios
+        .{ .patterns = &[_][]const u8{ "web*", "db*", "!*test", "!*debug" }, .tag = "web_server", .should_match = true, .description = "complex: allows web_server" },
+        .{ .patterns = &[_][]const u8{ "web*", "db*", "!*test", "!*debug" }, .tag = "db_connection", .should_match = true, .description = "complex: allows db_connection" },
+        .{ .patterns = &[_][]const u8{ "web*", "db*", "!*test", "!*debug" }, .tag = "web_test", .should_match = false, .description = "complex: excludes web_test" },
+        .{ .patterns = &[_][]const u8{ "web*", "db*", "!*test", "!*debug" }, .tag = "api_server", .should_match = false, .description = "complex: excludes api_server" },
+    };
+
+    for (test_cases) |case| {
+        // Create a backend and manually set up the filter
+        var backend = logger.LogBackend{};
+        var filter_list = std.BoundedArray([]const u8, 16){};
+
+        for (case.patterns) |pattern| {
+            const pattern_copy = std.heap.page_allocator.dupe(u8, pattern) catch continue;
+            filter_list.append(pattern_copy) catch continue;
+        }
+        backend.filter = filter_list;
+
+        const result = backend.shouldLog(.info, case.tag);
+
+        if (result != case.should_match) {
+            std.debug.print("FAIL: {s} - expected {}, got {}\n", .{ case.description, case.should_match, result });
+
+            // Clean up allocated patterns
+            for (filter_list.slice()) |pattern| {
+                std.heap.page_allocator.free(pattern);
+            }
+            return error.TestFailed;
+        } else {
+            std.debug.print("PASS: {s}\n", .{case.description});
+        }
+
+        // Clean up allocated patterns
+        for (filter_list.slice()) |pattern| {
+            std.heap.page_allocator.free(pattern);
+        }
+    }
+
+    std.debug.print("NOT operator filtering test completed\n", .{});
+}

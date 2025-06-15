@@ -73,11 +73,42 @@ custom_log.hexdump(data, .{});
 
 ## Environment Variables
 
-You can filter logs by tag using the `ZIGLOG` environment variable:
+You can filter logs by tag using the `ZIGLOG` environment variable with support for wildcards and exclusions:
 
 ```bash
-ZIGLOG=tag1,tag2 ./your-program
+# Exact matches
+ZIGLOG=database,network ./your-program
+
+# Wildcard patterns
+ZIGLOG=db*          # Match tags starting with "db" (db_connection, db_pool, etc.)
+ZIGLOG=*test        # Match tags ending with "test" (unit_test, integration_test, etc.)
+ZIGLOG=*net*        # Match tags containing "net" (network, ethernet, etc.)
+ZIGLOG=api*,*test   # Multiple patterns (api_server, api_client, unit_test, etc.)
+ZIGLOG=*            # Match all tags (show everything)
+
+# Exclusion patterns (NOT operator)
+ZIGLOG=!debug       # Exclude logs with tag "debug"
+ZIGLOG=!*test*      # Exclude any tags containing "test"
+ZIGLOG=!test*       # Exclude tags starting with "test"
+
+# Combined include/exclude patterns
+ZIGLOG=api*,!api_debug      # Include api* but exclude api_debug
+ZIGLOG=*,!test*,!*debug     # Include everything except test* and *debug
+ZIGLOG=web*,db*,!*test      # Include web* and db* but exclude anything with test
 ```
+
+**Wildcard Examples:**
+
+- `web*` → matches `web_server`, `web_client`, `web`
+- `*db` → matches `mysql_db`, `redis_db`, `db`
+- `*cache*` → matches `redis_cache`, `memory_cache`, `cache_manager`
+
+**NOT Operator Examples:**
+
+- `!debug` → excludes exactly `debug`
+- `!*test*` → excludes `unit_test`, `api_test`, `test_helper`, etc.
+- `api*,!api_debug` → includes `api_server`, `api_client` but excludes `api_debug`
+- `*,!production` → includes everything except `production`
 
 ## License
 

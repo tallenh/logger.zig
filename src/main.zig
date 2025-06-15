@@ -23,7 +23,7 @@ pub const LogOptions = struct {
 };
 
 // Centralized logging backend - handles all I/O and synchronization
-const LogBackend = struct {
+pub const LogBackend = struct {
     mutex: std.Thread.Mutex = .{},
     file: ?std.fs.File = null,
     show_global_timestamp: bool = false,
@@ -31,6 +31,17 @@ const LogBackend = struct {
 
     fn ensureFilterLoaded(self: *LogBackend) void {
         if (self.filter != null) return;
+        self.reloadFilter();
+    }
+
+    pub fn reloadFilter(self: *LogBackend) void {
+        // Clean up existing filter
+        if (self.filter) |f| {
+            for (f.slice()) |pattern| {
+                std.heap.page_allocator.free(pattern);
+            }
+        }
+        self.filter = null;
 
         const env = std.process.getEnvVarOwned(std.heap.page_allocator, "ZIGLOG") catch {
             self.filter = std.BoundedArray([]const u8, 16){};
@@ -47,20 +58,77 @@ const LogBackend = struct {
         self.filter = list;
     }
 
-    fn shouldLog(self: *LogBackend, level: LogLevel, tag: []const u8) bool {
+    pub fn shouldLog(self: *LogBackend, level: LogLevel, tag: []const u8) bool {
         // Build mode check
         if (builtin.mode != .Debug and level != .err) return false;
 
-        // Tag filtering
+        // Tag filtering with include/exclude support
         self.ensureFilterLoaded();
         if (self.filter) |f| {
             if (f.len == 0) return true;
-            for (f.slice()) |allowed| {
-                if (std.mem.eql(u8, allowed, tag)) return true;
+
+            var has_includes = false;
+            var included = false;
+
+            // First pass: check includes (patterns without !)
+            for (f.slice()) |pattern| {
+                if (!std.mem.startsWith(u8, pattern, "!")) {
+                    has_includes = true;
+                    if (self.tagMatches(tag, pattern)) {
+                        included = true;
+                        break;
+                    }
+                }
             }
-            return false;
+
+            // If no includes specified, default to included
+            if (!has_includes) {
+                included = true;
+            }
+
+            // Second pass: check excludes (patterns starting with !)
+            if (included) {
+                for (f.slice()) |pattern| {
+                    if (std.mem.startsWith(u8, pattern, "!")) {
+                        const exclude_pattern = pattern[1..]; // Remove the !
+                        if (self.tagMatches(tag, exclude_pattern)) {
+                            return false; // Excluded
+                        }
+                    }
+                }
+            }
+
+            return included;
         }
         return true;
+    }
+
+    pub fn tagMatches(self: *LogBackend, tag: []const u8, pattern: []const u8) bool {
+        _ = self; // Mark as used
+
+        // Exact match (no wildcards)
+        if (std.mem.indexOf(u8, pattern, "*") == null) {
+            return std.mem.eql(u8, pattern, tag);
+        }
+
+        // Handle wildcard patterns
+        if (std.mem.startsWith(u8, pattern, "*") and std.mem.endsWith(u8, pattern, "*")) {
+            // *substring* - contains match
+            if (pattern.len <= 2) return true; // Just "*" or "**" matches everything
+            const substring = pattern[1 .. pattern.len - 1];
+            return std.mem.indexOf(u8, tag, substring) != null;
+        } else if (std.mem.startsWith(u8, pattern, "*")) {
+            // *suffix - ends with match
+            const suffix = pattern[1..];
+            return std.mem.endsWith(u8, tag, suffix);
+        } else if (std.mem.endsWith(u8, pattern, "*")) {
+            // prefix* - starts with match
+            const prefix = pattern[0 .. pattern.len - 1];
+            return std.mem.startsWith(u8, tag, prefix);
+        }
+
+        // Fallback to exact match if pattern is malformed
+        return std.mem.eql(u8, pattern, tag);
     }
 
     fn writeLog(self: *LogBackend, level: LogLevel, tag: []const u8, color: ?LogColor, show_timestamp: bool, message: []const u8) void {
@@ -169,6 +237,11 @@ const LogBackend = struct {
 
 // Global backend instance
 var backend: LogBackend = .{};
+
+/// Force reload the ZIGLOG environment variable filter
+pub fn reloadLogFilter() void {
+    backend.reloadFilter();
+}
 
 pub const HexdumpOptions = struct {
     decimal_offset: bool = false,

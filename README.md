@@ -22,7 +22,7 @@ Add this to your `build.zig.zon`:
     .version = "0.1.0",
     .dependencies = .{
         .logger = .{
-            .url = "https://github.com/yourusername/logger/archive/refs/tags/v0.1.0.tar.gz",
+            .url = "https://github.com/tallenh/logger/archive/refs/tags/v0.1.0.tar.gz",
             .hash = "12345...", // You'll get this from zig fetch
         },
     },

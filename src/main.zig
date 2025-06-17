@@ -1,6 +1,11 @@
 const std = @import("std");
 const builtin = @import("builtin");
 
+/// Maximum number of filter patterns that can be parsed from the `ZIGLOG`
+/// environment variable.  Modify this value at compile-time to increase the
+/// capacity without touching the core implementation.
+pub const FILTER_CAP: usize = 16;
+
 pub const LogLevel = enum(u8) {
     debug = 0,
     info = 1,
@@ -72,7 +77,7 @@ pub const LogBackend = struct {
     file: ?std.fs.File = null,
     show_global_timestamp: bool = false,
     show_global_level: bool = false,
-    filter: ?std.BoundedArray(FilterEntry, 16) = null,
+    filter: ?std.BoundedArray(FilterEntry, FILTER_CAP) = null,
     filter_loaded: bool = false, // Optimization: avoid redundant environment checks
 
     fn ensureFilterLoaded(self: *LogBackend) void {
@@ -108,17 +113,17 @@ pub const LogBackend = struct {
 
         // In release mode, skip environment parsing for non-err levels
         if (builtin.mode != .Debug) {
-            self.filter = std.BoundedArray(FilterEntry, 16){};
+            self.filter = std.BoundedArray(FilterEntry, FILTER_CAP){};
             return;
         }
 
         const env = std.process.getEnvVarOwned(std.heap.page_allocator, "ZIGLOG") catch {
-            self.filter = std.BoundedArray(FilterEntry, 16){};
+            self.filter = std.BoundedArray(FilterEntry, FILTER_CAP){};
             return;
         };
         defer std.heap.page_allocator.free(env);
 
-        var list = std.BoundedArray(FilterEntry, 16){};
+        var list = std.BoundedArray(FilterEntry, FILTER_CAP){};
         var it = std.mem.splitSequence(u8, env, ",");
         while (it.next()) |entry_str| {
             const trimmed = std.mem.trim(u8, entry_str, " \t");
@@ -219,11 +224,22 @@ pub const LogBackend = struct {
     }
 
     pub fn shouldLog(self: *LogBackend, level: LogLevel, tag: []const u8) bool {
-        // Compile-time optimization: in release mode, only err logs are processed
+        // Fast compile-time filter: skip everything except err in Release/Safe modes.
         if (builtin.mode != .Debug and level != .err) return false;
 
-        // Debug mode: full filtering logic
+        // Make sure the filter is ready (lazily initialised).
         self.ensureFilterLoaded();
+
+        return self.shouldLogInternal(level, tag);
+    }
+
+    // Internal helper that contains the actual filtering algorithm. The caller must
+    // guarantee that `ensureFilterLoaded()` has already been executed.  It makes no
+    // attempt to acquire the mutex and is therefore safe to use from both locked
+    // and lock-free contexts.
+    fn shouldLogInternal(self: *LogBackend, level: LogLevel, tag: []const u8) bool {
+        // If there is no filter configured, everything is allowed (respecting
+        // compile-time optimisation already checked by the caller).
         if (self.filter) |f| {
             if (f.len == 0) return true;
 
@@ -232,40 +248,35 @@ pub const LogBackend = struct {
             var level_allowed = true;
             var active_level_spec: ?LevelSpec = null;
 
-            // First pass: check includes (entries without exclude_tag)
-            // Process patterns in order - later patterns override earlier ones
+            // Pass 1: includes (entries without the exclude flag). Later rules win.
             for (f.slice()) |entry| {
                 if (!entry.exclude_tag) {
                     has_includes = true;
                     if (self.tagMatches(tag, entry.tag_pattern)) {
                         included = true;
-                        // Later patterns override earlier ones (most recent wins)
                         if (entry.level_spec) |spec| {
                             active_level_spec = spec;
                         } else {
-                            // If no level spec, reset to default (allow all levels)
                             active_level_spec = null;
                         }
                     }
                 }
             }
 
-            // If no includes specified, default to included
             if (!has_includes) {
                 included = true;
             }
 
-            // Check level against the active level specification
             if (active_level_spec) |spec| {
                 level_allowed = self.levelMatches(level, spec);
             }
 
-            // Second pass: check excludes (entries with exclude_tag)
+            // Pass 2: explicit excludes.
             if (included) {
                 for (f.slice()) |entry| {
                     if (entry.exclude_tag) {
                         if (self.tagMatches(tag, entry.tag_pattern)) {
-                            return false; // Excluded entirely
+                            return false;
                         }
                     }
                 }
@@ -273,6 +284,7 @@ pub const LogBackend = struct {
 
             return included and level_allowed;
         }
+
         return true;
     }
 
@@ -319,11 +331,15 @@ pub const LogBackend = struct {
     }
 
     fn writeLog(self: *LogBackend, level: LogLevel, tag: []const u8, color: ?LogColor, show_timestamp: bool, show_level: bool, message: []const u8) void {
+        // First, perform the inexpensive filtering without taking the mutex.
+        if (!self.shouldLog(level, tag)) return;
+
         self.mutex.lock();
         defer self.mutex.unlock();
 
-        // Check if we should log inside the mutex to avoid double acquisition
-        if (!self.shouldLogUnsafe(level, tag)) return;
+        // Re-check now that the lock is held to protect against race conditions
+        // (e.g., another thread could have reloaded the filter in between).
+        if (!self.shouldLogInternal(level, tag)) return;
 
         const actual_color = if (color) |c| colorCode(c) else levelToColor(level);
         const label = levelToLabel(level);
@@ -340,8 +356,8 @@ pub const LogBackend = struct {
         const ts_prefix: []u8 = if (show_ts) blk: {
             var buf: [32]u8 = undefined;
             const now = std.time.timestamp();
-            const slice = std.fmt.bufPrintZ(&buf, "[{d}] ", .{now}) catch break :blk ""[0..0];
-            break :blk slice[0 .. slice.len - 1]; // remove null terminator
+            const slice = std.fmt.bufPrint(buf[0..], "[{d}] ", .{now}) catch break :blk ""[0..0];
+            break :blk slice;
         } else ""[0..0];
 
         const show_lvl = show_level or self.show_global_level;
@@ -358,80 +374,19 @@ pub const LogBackend = struct {
         }
     }
 
-    // Add a new function that doesn't use the mutex (for internal use when mutex is already held)
-    pub fn shouldLogUnsafe(self: *LogBackend, level: LogLevel, tag: []const u8) bool {
-        // Compile-time optimization: in release mode, only err logs are processed
-        if (builtin.mode != .Debug and level != .err) return false;
-
-        // Debug mode: full filtering logic
-        self.ensureFilterLoadedUnsafe();
-        if (self.filter) |f| {
-            if (f.len == 0) return true;
-
-            var has_includes = false;
-            var included = false;
-            var level_allowed = true;
-            var active_level_spec: ?LevelSpec = null;
-
-            // First pass: check includes (entries without exclude_tag)
-            // Process patterns in order - later patterns override earlier ones
-            for (f.slice()) |entry| {
-                if (!entry.exclude_tag) {
-                    has_includes = true;
-                    if (self.tagMatches(tag, entry.tag_pattern)) {
-                        included = true;
-                        // Later patterns override earlier ones (most recent wins)
-                        if (entry.level_spec) |spec| {
-                            active_level_spec = spec;
-                        } else {
-                            // If no level spec, reset to default (allow all levels)
-                            active_level_spec = null;
-                        }
-                    }
-                }
-            }
-
-            // If no includes specified, default to included
-            if (!has_includes) {
-                included = true;
-            }
-
-            // Check level against the active level specification
-            if (active_level_spec) |spec| {
-                level_allowed = self.levelMatches(level, spec);
-            }
-
-            // Second pass: check excludes (entries with exclude_tag)
-            if (included) {
-                for (f.slice()) |entry| {
-                    if (entry.exclude_tag) {
-                        if (self.tagMatches(tag, entry.tag_pattern)) {
-                            return false; // Excluded entirely
-                        }
-                    }
-                }
-            }
-
-            return included and level_allowed;
-        }
-        return true;
-    }
-
-    // Add unsafe version that doesn't acquire mutex
-    fn ensureFilterLoadedUnsafe(self: *LogBackend) void {
-        if (self.filter_loaded) return;
-        self.reloadFilterUnsafe();
-        self.filter_loaded = true;
-    }
-
     fn writeHexdump(self: *LogBackend, tag: []const u8, color: ?LogColor, buf: []const u8, opts: HexdumpOptions) void {
-        // Hexdump only works in debug mode - compile-time optimization
+        // Hexdump only meaningful in debug builds; in Release/Safe we exit quickly.
         if (builtin.mode != .Debug) return;
+
+        // Fast filter check without locking.
+        if (!self.shouldLog(.debug, tag)) return;
 
         self.mutex.lock();
         defer self.mutex.unlock();
 
-        if (!self.shouldLogUnsafe(.debug, tag)) return;
+        // Re-check now that the lock is held to protect against race conditions
+        // (e.g., another thread could have reloaded the filter in between).
+        if (!self.shouldLogInternal(.debug, tag)) return;
 
         const actual_color = if (color) |c| colorCode(c) else levelToColor(.debug);
         const reset = "\x1b[0m";
@@ -498,6 +453,20 @@ pub const LogBackend = struct {
                 file.writer().print("{s} |{s}|\n", .{ hex_line[0..hex_i], ascii_line[0..ascii_i] }) catch {};
             }
         }
+    }
+
+    /// Compatibility shim used by unit-tests. It performs the same logic as
+    /// `shouldLog` but **does not** take the backend mutex.  The caller must
+    /// guarantee no concurrent reload or write is in progress.
+    pub fn shouldLogUnsafe(self: *LogBackend, level: LogLevel, tag: []const u8) bool {
+        if (builtin.mode != .Debug and level != .err) return false;
+
+        // The filter may still need to be initialised; we reuse the regular
+        // loader which itself is thread-safe.  This will momentarily acquire
+        // the mutex only on first use.
+        self.ensureFilterLoaded();
+
+        return self.shouldLogInternal(level, tag);
     }
 };
 

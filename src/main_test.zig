@@ -205,55 +205,70 @@ test "NOT operator filtering" {
     const test_cases = [_]struct {
         patterns: []const []const u8,
         tag: []const u8,
+        level: logger.LogLevel,
         should_match: bool,
         description: []const u8,
     }{
         // Simple NOT patterns
-        .{ .patterns = &[_][]const u8{"!debug"}, .tag = "debug", .should_match = false, .description = "!debug excludes debug" },
-        .{ .patterns = &[_][]const u8{"!debug"}, .tag = "info", .should_match = true, .description = "!debug allows info" },
+        .{ .patterns = &[_][]const u8{"!debug"}, .tag = "debug", .level = .info, .should_match = false, .description = "!debug excludes debug" },
+        .{ .patterns = &[_][]const u8{"!debug"}, .tag = "info", .level = .info, .should_match = true, .description = "!debug allows info" },
 
         // NOT with wildcards
-        .{ .patterns = &[_][]const u8{"!test*"}, .tag = "testing", .should_match = false, .description = "!test* excludes testing" },
-        .{ .patterns = &[_][]const u8{"!test*"}, .tag = "production", .should_match = true, .description = "!test* allows production" },
-        .{ .patterns = &[_][]const u8{"!*debug*"}, .tag = "api_debug", .should_match = false, .description = "!*debug* excludes api_debug" },
-        .{ .patterns = &[_][]const u8{"!*debug*"}, .tag = "api_info", .should_match = true, .description = "!*debug* allows api_info" },
+        .{ .patterns = &[_][]const u8{"!test*"}, .tag = "testing", .level = .info, .should_match = false, .description = "!test* excludes testing" },
+        .{ .patterns = &[_][]const u8{"!test*"}, .tag = "production", .level = .info, .should_match = true, .description = "!test* allows production" },
+        .{ .patterns = &[_][]const u8{"!*debug*"}, .tag = "api_debug", .level = .info, .should_match = false, .description = "!*debug* excludes api_debug" },
+        .{ .patterns = &[_][]const u8{"!*debug*"}, .tag = "api_info", .level = .info, .should_match = true, .description = "!*debug* allows api_info" },
 
         // Include + exclude combinations
-        .{ .patterns = &[_][]const u8{ "api*", "!api_debug" }, .tag = "api_server", .should_match = true, .description = "api*,!api_debug allows api_server" },
-        .{ .patterns = &[_][]const u8{ "api*", "!api_debug" }, .tag = "api_debug", .should_match = false, .description = "api*,!api_debug excludes api_debug" },
-        .{ .patterns = &[_][]const u8{ "api*", "!api_debug" }, .tag = "database", .should_match = false, .description = "api*,!api_debug excludes database" },
+        .{ .patterns = &[_][]const u8{ "api*", "!api_debug" }, .tag = "api_server", .level = .info, .should_match = true, .description = "api*,!api_debug allows api_server" },
+        .{ .patterns = &[_][]const u8{ "api*", "!api_debug" }, .tag = "api_debug", .level = .info, .should_match = false, .description = "api*,!api_debug excludes api_debug" },
+        .{ .patterns = &[_][]const u8{ "api*", "!api_debug" }, .tag = "database", .level = .info, .should_match = false, .description = "api*,!api_debug excludes database" },
 
         // Multiple excludes
-        .{ .patterns = &[_][]const u8{ "*", "!test*", "!*debug" }, .tag = "production", .should_match = true, .description = "*,!test*,!*debug allows production" },
-        .{ .patterns = &[_][]const u8{ "*", "!test*", "!*debug" }, .tag = "testing", .should_match = false, .description = "*,!test*,!*debug excludes testing" },
-        .{ .patterns = &[_][]const u8{ "*", "!test*", "!*debug" }, .tag = "api_debug", .should_match = false, .description = "*,!test*,!*debug excludes api_debug" },
+        .{ .patterns = &[_][]const u8{ "*", "!test*", "!*debug" }, .tag = "production", .level = .info, .should_match = true, .description = "*,!test*,!*debug allows production" },
+        .{ .patterns = &[_][]const u8{ "*", "!test*", "!*debug" }, .tag = "testing", .level = .info, .should_match = false, .description = "*,!test*,!*debug excludes testing" },
+        .{ .patterns = &[_][]const u8{ "*", "!test*", "!*debug" }, .tag = "api_debug", .level = .info, .should_match = false, .description = "*,!test*,!*debug excludes api_debug" },
 
         // Complex scenarios
-        .{ .patterns = &[_][]const u8{ "web*", "db*", "!*test", "!*debug" }, .tag = "web_server", .should_match = true, .description = "complex: allows web_server" },
-        .{ .patterns = &[_][]const u8{ "web*", "db*", "!*test", "!*debug" }, .tag = "db_connection", .should_match = true, .description = "complex: allows db_connection" },
-        .{ .patterns = &[_][]const u8{ "web*", "db*", "!*test", "!*debug" }, .tag = "web_test", .should_match = false, .description = "complex: excludes web_test" },
-        .{ .patterns = &[_][]const u8{ "web*", "db*", "!*test", "!*debug" }, .tag = "api_server", .should_match = false, .description = "complex: excludes api_server" },
+        .{ .patterns = &[_][]const u8{ "web*", "db*", "!*test", "!*debug" }, .tag = "web_server", .level = .info, .should_match = true, .description = "complex: allows web_server" },
+        .{ .patterns = &[_][]const u8{ "web*", "db*", "!*test", "!*debug" }, .tag = "db_connection", .level = .info, .should_match = true, .description = "complex: allows db_connection" },
+        .{ .patterns = &[_][]const u8{ "web*", "db*", "!*test", "!*debug" }, .tag = "web_test", .level = .info, .should_match = false, .description = "complex: excludes web_test" },
+        .{ .patterns = &[_][]const u8{ "web*", "db*", "!*test", "!*debug" }, .tag = "api_server", .level = .info, .should_match = false, .description = "complex: excludes api_server" },
     };
 
     for (test_cases) |case| {
         // Create a backend and manually set up the filter
         var backend = logger.LogBackend{};
-        var filter_list = std.BoundedArray([]const u8, 16){};
+        var filter_list = std.BoundedArray(logger.FilterEntry, 16){};
 
         for (case.patterns) |pattern| {
-            const pattern_copy = std.heap.page_allocator.dupe(u8, pattern) catch continue;
-            filter_list.append(pattern_copy) catch continue;
+            // Create FilterEntry manually based on pattern
+            var exclude_tag = false;
+            var working_str = pattern;
+            if (std.mem.startsWith(u8, pattern, "!")) {
+                exclude_tag = true;
+                working_str = pattern[1..];
+            }
+
+            const tag_pattern = std.heap.page_allocator.dupe(u8, working_str) catch continue;
+
+            const filter_entry = logger.FilterEntry{
+                .tag_pattern = tag_pattern,
+                .exclude_tag = exclude_tag,
+            };
+
+            filter_list.append(filter_entry) catch continue;
         }
         backend.filter = filter_list;
 
-        const result = backend.shouldLog(.info, case.tag);
+        const result = backend.shouldLogUnsafe(case.level, case.tag);
 
         if (result != case.should_match) {
             std.debug.print("FAIL: {s} - expected {}, got {}\n", .{ case.description, case.should_match, result });
 
             // Clean up allocated patterns
-            for (filter_list.slice()) |pattern| {
-                std.heap.page_allocator.free(pattern);
+            for (filter_list.slice()) |entry| {
+                std.heap.page_allocator.free(entry.tag_pattern);
             }
             return error.TestFailed;
         } else {
@@ -261,8 +276,8 @@ test "NOT operator filtering" {
         }
 
         // Clean up allocated patterns
-        for (filter_list.slice()) |pattern| {
-            std.heap.page_allocator.free(pattern);
+        for (filter_list.slice()) |entry| {
+            std.heap.page_allocator.free(entry.tag_pattern);
         }
     }
 
@@ -289,4 +304,353 @@ test "show level functionality" {
     level_log.info("message with individual level", .{});
 
     std.debug.print("Show level functionality test completed\n", .{});
+}
+
+test "level filtering - basic level specs" {
+    std.debug.print("Testing basic level filtering specs...\n", .{});
+
+    const TestCase = struct {
+        pattern: []const u8,
+        tag: []const u8,
+        level: logger.LogLevel,
+        should_show: bool,
+        description: []const u8,
+    };
+
+    const test_cases = [_]TestCase{
+        // Exact level matching
+        .{ .pattern = "*:debug", .tag = "app", .level = .debug, .should_show = true, .description = "*:debug allows debug" },
+        .{ .pattern = "*:debug", .tag = "app", .level = .info, .should_show = false, .description = "*:debug excludes info" },
+        .{ .pattern = "*:info", .tag = "app", .level = .info, .should_show = true, .description = "*:info allows info" },
+        .{ .pattern = "*:warn", .tag = "app", .level = .warn, .should_show = true, .description = "*:warn allows warn" },
+        .{ .pattern = "*:err", .tag = "app", .level = .err, .should_show = true, .description = "*:err allows err" },
+
+        // Plus mode (level and above)
+        .{ .pattern = "*:debug+", .tag = "app", .level = .debug, .should_show = true, .description = "*:debug+ allows debug" },
+        .{ .pattern = "*:debug+", .tag = "app", .level = .info, .should_show = true, .description = "*:debug+ allows info" },
+        .{ .pattern = "*:debug+", .tag = "app", .level = .warn, .should_show = true, .description = "*:debug+ allows warn" },
+        .{ .pattern = "*:debug+", .tag = "app", .level = .err, .should_show = true, .description = "*:debug+ allows err" },
+
+        .{ .pattern = "*:warn+", .tag = "app", .level = .debug, .should_show = false, .description = "*:warn+ excludes debug" },
+        .{ .pattern = "*:warn+", .tag = "app", .level = .info, .should_show = false, .description = "*:warn+ excludes info" },
+        .{ .pattern = "*:warn+", .tag = "app", .level = .warn, .should_show = true, .description = "*:warn+ allows warn" },
+        .{ .pattern = "*:warn+", .tag = "app", .level = .err, .should_show = true, .description = "*:warn+ allows err" },
+
+        // Minus mode (level and below)
+        .{ .pattern = "*:warn-", .tag = "app", .level = .debug, .should_show = true, .description = "*:warn- allows debug" },
+        .{ .pattern = "*:warn-", .tag = "app", .level = .info, .should_show = true, .description = "*:warn- allows info" },
+        .{ .pattern = "*:warn-", .tag = "app", .level = .warn, .should_show = true, .description = "*:warn- allows warn" },
+        .{ .pattern = "*:warn-", .tag = "app", .level = .err, .should_show = false, .description = "*:warn- excludes err" },
+
+        // NOT mode (exclude exact level)
+        .{ .pattern = "*:!debug", .tag = "app", .level = .debug, .should_show = false, .description = "*:!debug excludes debug" },
+        .{ .pattern = "*:!debug", .tag = "app", .level = .info, .should_show = true, .description = "*:!debug allows info" },
+        .{ .pattern = "*:!debug", .tag = "app", .level = .warn, .should_show = true, .description = "*:!debug allows warn" },
+        .{ .pattern = "*:!debug", .tag = "app", .level = .err, .should_show = true, .description = "*:!debug allows err" },
+
+        // NOT plus mode (exclude level and above)
+        .{ .pattern = "*:!warn+", .tag = "app", .level = .debug, .should_show = true, .description = "*:!warn+ allows debug" },
+        .{ .pattern = "*:!warn+", .tag = "app", .level = .info, .should_show = true, .description = "*:!warn+ allows info" },
+        .{ .pattern = "*:!warn+", .tag = "app", .level = .warn, .should_show = false, .description = "*:!warn+ excludes warn" },
+        .{ .pattern = "*:!warn+", .tag = "app", .level = .err, .should_show = false, .description = "*:!warn+ excludes err" },
+
+        // NOT minus mode (exclude level and below)
+        .{ .pattern = "*:!warn-", .tag = "app", .level = .debug, .should_show = false, .description = "*:!warn- excludes debug" },
+        .{ .pattern = "*:!warn-", .tag = "app", .level = .info, .should_show = false, .description = "*:!warn- excludes info" },
+        .{ .pattern = "*:!warn-", .tag = "app", .level = .warn, .should_show = false, .description = "*:!warn- excludes warn" },
+        .{ .pattern = "*:!warn-", .tag = "app", .level = .err, .should_show = true, .description = "*:!warn- allows err" },
+    };
+
+    for (test_cases) |case| {
+        var backend = logger.LogBackend{};
+        if (parsePattern(&backend, case.pattern)) {
+            const result = backend.shouldLogUnsafe(case.level, case.tag);
+            if (result != case.should_show) {
+                std.debug.print("FAIL: {s} - expected {}, got {}\n", .{ case.description, case.should_show, result });
+                cleanupBackend(&backend);
+                return error.TestFailed;
+            } else {
+                std.debug.print("PASS: {s}\n", .{case.description});
+            }
+        }
+        cleanupBackend(&backend);
+    }
+
+    std.debug.print("Level filtering basic specs test completed\n", .{});
+}
+
+test "level filtering - tag specific overrides" {
+    std.debug.print("Testing tag-specific level filtering overrides...\n", .{});
+
+    const TestCase = struct {
+        pattern: []const u8,
+        tag: []const u8,
+        level: logger.LogLevel,
+        should_show: bool,
+        description: []const u8,
+    };
+
+    const test_cases = [_]TestCase{
+        // Global warn+ with database debug override
+        .{ .pattern = "*:warn+,database:debug", .tag = "app", .level = .debug, .should_show = false, .description = "global warn+ excludes app debug" },
+        .{ .pattern = "*:warn+,database:debug", .tag = "app", .level = .warn, .should_show = true, .description = "global warn+ allows app warn" },
+        .{ .pattern = "*:warn+,database:debug", .tag = "database", .level = .debug, .should_show = true, .description = "database override allows debug" },
+        .{ .pattern = "*:warn+,database:debug", .tag = "database", .level = .info, .should_show = false, .description = "database exact debug only" },
+
+        // Multiple tag-specific patterns
+        .{ .pattern = "*:err,app:info+,db:debug+", .tag = "app", .level = .info, .should_show = true, .description = "app gets info+" },
+        .{ .pattern = "*:err,app:info+,db:debug+", .tag = "app", .level = .debug, .should_show = false, .description = "app excludes debug" },
+        .{ .pattern = "*:err,app:info+,db:debug+", .tag = "db", .level = .debug, .should_show = true, .description = "db gets debug+" },
+        .{ .pattern = "*:err,app:info+,db:debug+", .tag = "other", .level = .err, .should_show = true, .description = "other gets global err" },
+        .{ .pattern = "*:err,app:info+,db:debug+", .tag = "other", .level = .warn, .should_show = false, .description = "other excludes warn" },
+
+        // Tag wildcards with level specs
+        .{ .pattern = "api*:debug+,web*:warn+", .tag = "api_server", .level = .debug, .should_show = true, .description = "api* gets debug+" },
+        .{ .pattern = "api*:debug+,web*:warn+", .tag = "web_server", .level = .info, .should_show = false, .description = "web* excludes info" },
+        .{ .pattern = "api*:debug+,web*:warn+", .tag = "web_server", .level = .warn, .should_show = true, .description = "web* allows warn" },
+        .{ .pattern = "api*:debug+,web*:warn+", .tag = "db_server", .level = .debug, .should_show = false, .description = "unmatched tag gets nothing" },
+    };
+
+    for (test_cases) |case| {
+        var backend = logger.LogBackend{};
+        if (parsePattern(&backend, case.pattern)) {
+            const result = backend.shouldLogUnsafe(case.level, case.tag);
+            if (result != case.should_show) {
+                std.debug.print("FAIL: {s} - expected {}, got {}\n", .{ case.description, case.should_show, result });
+                cleanupBackend(&backend);
+                return error.TestFailed;
+            } else {
+                std.debug.print("PASS: {s}\n", .{case.description});
+            }
+        }
+        cleanupBackend(&backend);
+    }
+
+    std.debug.print("Tag-specific level filtering test completed\n", .{});
+}
+
+test "level filtering - complex patterns" {
+    std.debug.print("Testing complex level filtering patterns...\n", .{});
+
+    const TestCase = struct {
+        pattern: []const u8,
+        tag: []const u8,
+        level: logger.LogLevel,
+        should_show: bool,
+        description: []const u8,
+    };
+
+    const test_cases = [_]TestCase{
+        // Tag exclusion with level filtering
+        .{ .pattern = "!network,*:info+", .tag = "app", .level = .debug, .should_show = false, .description = "global info+ excludes app debug" },
+        .{ .pattern = "!network,*:info+", .tag = "app", .level = .info, .should_show = true, .description = "global info+ allows app info" },
+        .{ .pattern = "!network,*:info+", .tag = "network", .level = .err, .should_show = false, .description = "network completely excluded" },
+
+        // Multiple exclusions with overrides
+        .{ .pattern = "!network,!test*,*:debug+,db:warn+", .tag = "app", .level = .debug, .should_show = true, .description = "app gets global debug+" },
+        .{ .pattern = "!network,!test*,*:debug+,db:warn+", .tag = "db", .level = .info, .should_show = false, .description = "db override to warn+" },
+        .{ .pattern = "!network,!test*,*:debug+,db:warn+", .tag = "db", .level = .warn, .should_show = true, .description = "db allows warn" },
+        .{ .pattern = "!network,!test*,*:debug+,db:warn+", .tag = "testing", .should_show = false, .level = .err, .description = "test* excluded" },
+        .{ .pattern = "!network,!test*,*:debug+,db:warn+", .tag = "network", .level = .err, .should_show = false, .description = "network excluded" },
+
+        // Level exclusions with tag patterns
+        .{ .pattern = "api*:!debug,web*:!warn+", .tag = "api_server", .level = .debug, .should_show = false, .description = "api* excludes debug" },
+        .{ .pattern = "api*:!debug,web*:!warn+", .tag = "api_server", .level = .info, .should_show = true, .description = "api* allows info" },
+        .{ .pattern = "api*:!debug,web*:!warn+", .tag = "web_server", .level = .info, .should_show = true, .description = "web* allows info" },
+        .{ .pattern = "api*:!debug,web*:!warn+", .tag = "web_server", .level = .warn, .should_show = false, .description = "web* excludes warn+" },
+        .{ .pattern = "api*:!debug,web*:!warn+", .tag = "web_server", .level = .err, .should_show = false, .description = "web* excludes err (warn+)" },
+
+        // Pattern precedence (later patterns override earlier ones)
+        .{ .pattern = "*:err,app:warn+,app:debug+", .tag = "app", .level = .debug, .should_show = true, .description = "last pattern wins (debug+)" },
+        .{ .pattern = "*:debug+,app:err", .tag = "app", .level = .info, .should_show = false, .description = "app override to err only" },
+        .{ .pattern = "*:debug+,app:err", .tag = "app", .level = .err, .should_show = true, .description = "app allows err" },
+    };
+
+    for (test_cases) |case| {
+        var backend = logger.LogBackend{};
+        if (parsePattern(&backend, case.pattern)) {
+            const result = backend.shouldLogUnsafe(case.level, case.tag);
+            if (result != case.should_show) {
+                std.debug.print("FAIL: {s} - expected {}, got {}\n", .{ case.description, case.should_show, result });
+                cleanupBackend(&backend);
+                return error.TestFailed;
+            } else {
+                std.debug.print("PASS: {s}\n", .{case.description});
+            }
+        }
+        cleanupBackend(&backend);
+    }
+
+    std.debug.print("Complex level filtering patterns test completed\n", .{});
+}
+
+test "level filtering - edge cases" {
+    std.debug.print("Testing level filtering edge cases...\n", .{});
+
+    const TestCase = struct {
+        pattern: []const u8,
+        tag: []const u8,
+        level: logger.LogLevel,
+        should_show: bool,
+        description: []const u8,
+    };
+
+    const test_cases = [_]TestCase{
+        // Empty and wildcard patterns
+        .{ .pattern = "", .tag = "app", .level = .debug, .should_show = true, .description = "empty pattern allows all" },
+        .{ .pattern = "*", .tag = "app", .level = .debug, .should_show = true, .description = "* wildcard allows all" },
+
+        // Alternative level names (dbg vs debug, err vs error)
+        .{ .pattern = "*:dbg", .tag = "app", .level = .debug, .should_show = true, .description = "dbg alias for debug" },
+        .{ .pattern = "*:error", .tag = "app", .level = .err, .should_show = true, .description = "error alias for err" },
+
+        // Mixed alias and standard names
+        .{ .pattern = "*:dbg+", .tag = "app", .level = .info, .should_show = true, .description = "dbg+ includes info" },
+        .{ .pattern = "*:!error", .tag = "app", .level = .err, .should_show = false, .description = "!error excludes err" },
+
+        // No include patterns (everything allowed by default)
+        .{ .pattern = "!test", .tag = "app", .level = .debug, .should_show = true, .description = "no includes = allow all except excluded" },
+        .{ .pattern = "!test", .tag = "test", .level = .debug, .should_show = false, .description = "excluded tag blocked" },
+
+        // Multiple exclusions
+        .{ .pattern = "!test,!debug*,!*tmp", .tag = "app", .level = .debug, .should_show = true, .description = "multiple exclusions allow non-matching" },
+        .{ .pattern = "!test,!debug*,!*tmp", .tag = "test", .level = .debug, .should_show = false, .description = "first exclusion works" },
+        .{ .pattern = "!test,!debug*,!*tmp", .tag = "debug_server", .level = .debug, .should_show = false, .description = "second exclusion works" },
+        .{ .pattern = "!test,!debug*,!*tmp", .tag = "app_tmp", .level = .debug, .should_show = false, .description = "third exclusion works" },
+    };
+
+    for (test_cases) |case| {
+        var backend = logger.LogBackend{};
+        if (parsePattern(&backend, case.pattern)) {
+            const result = backend.shouldLogUnsafe(case.level, case.tag);
+            if (result != case.should_show) {
+                std.debug.print("FAIL: {s} - expected {}, got {}\n", .{ case.description, case.should_show, result });
+                cleanupBackend(&backend);
+                return error.TestFailed;
+            } else {
+                std.debug.print("PASS: {s}\n", .{case.description});
+            }
+        }
+        cleanupBackend(&backend);
+    }
+
+    std.debug.print("Level filtering edge cases test completed\n", .{});
+}
+
+// Helper functions for level filtering tests
+fn parsePattern(backend: *logger.LogBackend, pattern: []const u8) bool {
+    if (pattern.len == 0) {
+        backend.filter = std.BoundedArray(logger.FilterEntry, 16){};
+        return true;
+    }
+
+    var list = std.BoundedArray(logger.FilterEntry, 16){};
+    var it = std.mem.splitSequence(u8, pattern, ",");
+
+    while (it.next()) |entry_str| {
+        const trimmed = std.mem.trim(u8, entry_str, " \t");
+        if (trimmed.len == 0) continue;
+
+        if (parseFilterEntry(trimmed)) |filter_entry| {
+            list.append(filter_entry) catch return false;
+        }
+    }
+
+    backend.filter = list;
+    return true;
+}
+
+fn parseFilterEntry(entry_str: []const u8) ?logger.FilterEntry {
+    var tag_pattern: []const u8 = "";
+    var level_spec: ?logger.LevelSpec = null;
+    var exclude_tag = false;
+
+    // Handle tag exclusion (!tag or !tag:level)
+    var working_str = entry_str;
+    if (std.mem.startsWith(u8, entry_str, "!")) {
+        exclude_tag = true;
+        working_str = entry_str[1..];
+    }
+
+    // Split on ':' to separate tag and level parts
+    if (std.mem.indexOf(u8, working_str, ":")) |colon_idx| {
+        const tag_part = working_str[0..colon_idx];
+        const level_part = working_str[colon_idx + 1 ..];
+
+        // If excluding entire tag, ignore level part
+        if (exclude_tag) {
+            tag_pattern = std.heap.page_allocator.dupe(u8, tag_part) catch return null;
+        } else {
+            tag_pattern = std.heap.page_allocator.dupe(u8, tag_part) catch return null;
+            level_spec = parseLevelSpec(level_part);
+        }
+    } else {
+        // No colon, just tag pattern
+        tag_pattern = std.heap.page_allocator.dupe(u8, working_str) catch return null;
+    }
+
+    return logger.FilterEntry{
+        .tag_pattern = tag_pattern,
+        .level_spec = level_spec,
+        .exclude_tag = exclude_tag,
+    };
+}
+
+fn parseLevelSpec(level_str: []const u8) ?logger.LevelSpec {
+    if (level_str.len == 0) return null;
+
+    var mode: logger.LevelFilterMode = .exact;
+    var level_name: []const u8 = level_str;
+
+    // Handle negation (!level, !level+, !level-)
+    if (std.mem.startsWith(u8, level_str, "!")) {
+        level_name = level_str[1..];
+        if (std.mem.endsWith(u8, level_name, "+")) {
+            mode = .not_plus;
+            level_name = level_name[0 .. level_name.len - 1];
+        } else if (std.mem.endsWith(u8, level_name, "-")) {
+            mode = .not_minus;
+            level_name = level_name[0 .. level_name.len - 1];
+        } else {
+            mode = .not_exact;
+        }
+    } else {
+        // Handle positive modes (level, level+, level-)
+        if (std.mem.endsWith(u8, level_name, "+")) {
+            mode = .plus;
+            level_name = level_name[0 .. level_name.len - 1];
+        } else if (std.mem.endsWith(u8, level_name, "-")) {
+            mode = .minus;
+            level_name = level_name[0 .. level_name.len - 1];
+        }
+    }
+
+    // Parse level name
+    const level = parseLogLevel(level_name) orelse return null;
+
+    return logger.LevelSpec{
+        .level = level,
+        .mode = mode,
+    };
+}
+
+fn parseLogLevel(level_name: []const u8) ?logger.LogLevel {
+    if (std.mem.eql(u8, level_name, "debug") or std.mem.eql(u8, level_name, "dbg")) {
+        return .debug;
+    } else if (std.mem.eql(u8, level_name, "info")) {
+        return .info;
+    } else if (std.mem.eql(u8, level_name, "warn")) {
+        return .warn;
+    } else if (std.mem.eql(u8, level_name, "err") or std.mem.eql(u8, level_name, "error")) {
+        return .err;
+    }
+    return null;
+}
+
+fn cleanupBackend(backend: *logger.LogBackend) void {
+    if (backend.filter) |f| {
+        for (f.slice()) |entry| {
+            std.heap.page_allocator.free(entry.tag_pattern);
+        }
+    }
 }

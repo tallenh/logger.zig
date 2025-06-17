@@ -15,6 +15,31 @@ pub const LogColor = enum {
     magenta,
 };
 
+// New types for the enhanced filtering system
+pub const LevelFilterMode = enum {
+    exact, // :level
+    plus, // :level+
+    minus, // :level-
+    not_exact, // :!level
+    not_plus, // :!level+
+    not_minus, // :!level-
+};
+
+pub const LevelSpec = struct {
+    level: LogLevel,
+    mode: LevelFilterMode,
+};
+
+pub const FilterEntry = struct {
+    tag_pattern: []const u8,
+    level_spec: ?LevelSpec = null,
+    exclude_tag: bool = false, // true for !tag patterns
+
+    pub fn deinit(self: FilterEntry, allocator: std.mem.Allocator) void {
+        allocator.free(self.tag_pattern);
+    }
+};
+
 pub const LogOptions = struct {
     tag: []const u8 = "default",
     color: ?LogColor = null,
@@ -29,56 +54,171 @@ pub const LogBackend = struct {
     file: ?std.fs.File = null,
     show_global_timestamp: bool = false,
     show_global_level: bool = false,
-    filter: ?std.BoundedArray([]const u8, 16) = null,
+    filter: ?std.BoundedArray(FilterEntry, 16) = null,
 
     fn ensureFilterLoaded(self: *LogBackend) void {
+        // First check without lock for performance
         if (self.filter != null) return;
-        self.reloadFilter();
+
+        // Double-checked locking pattern for thread safety
+        self.mutex.lock();
+        defer self.mutex.unlock();
+
+        // Check again after acquiring lock
+        if (self.filter != null) return;
+
+        self.reloadFilterUnsafe();
     }
 
     pub fn reloadFilter(self: *LogBackend) void {
+        self.mutex.lock();
+        defer self.mutex.unlock();
+        self.reloadFilterUnsafe();
+    }
+
+    fn reloadFilterUnsafe(self: *LogBackend) void {
         // Clean up existing filter
         if (self.filter) |f| {
-            for (f.slice()) |pattern| {
-                std.heap.page_allocator.free(pattern);
+            for (f.slice()) |entry| {
+                entry.deinit(std.heap.page_allocator);
             }
         }
         self.filter = null;
 
         const env = std.process.getEnvVarOwned(std.heap.page_allocator, "ZIGLOG") catch {
-            self.filter = std.BoundedArray([]const u8, 16){};
+            self.filter = std.BoundedArray(FilterEntry, 16){};
             return;
         };
         defer std.heap.page_allocator.free(env);
 
-        var list = std.BoundedArray([]const u8, 16){};
+        var list = std.BoundedArray(FilterEntry, 16){};
         var it = std.mem.splitSequence(u8, env, ",");
-        while (it.next()) |entry| {
-            const entry_copy = std.heap.page_allocator.dupe(u8, entry) catch continue;
-            list.append(entry_copy) catch {};
+        while (it.next()) |entry_str| {
+            const trimmed = std.mem.trim(u8, entry_str, " \t");
+            if (trimmed.len == 0) continue;
+
+            if (parseFilterEntry(trimmed)) |filter_entry| {
+                list.append(filter_entry) catch {};
+            }
         }
         self.filter = list;
+    }
+
+    fn parseFilterEntry(entry_str: []const u8) ?FilterEntry {
+        var tag_pattern: []const u8 = "";
+        var level_spec: ?LevelSpec = null;
+        var exclude_tag = false;
+
+        // Handle tag exclusion (!tag or !tag:level)
+        var working_str = entry_str;
+        if (std.mem.startsWith(u8, entry_str, "!")) {
+            exclude_tag = true;
+            working_str = entry_str[1..];
+        }
+
+        // Split on ':' to separate tag and level parts
+        if (std.mem.indexOf(u8, working_str, ":")) |colon_idx| {
+            const tag_part = working_str[0..colon_idx];
+            const level_part = working_str[colon_idx + 1 ..];
+
+            // If excluding entire tag, ignore level part
+            if (exclude_tag) {
+                tag_pattern = std.heap.page_allocator.dupe(u8, tag_part) catch return null;
+            } else {
+                tag_pattern = std.heap.page_allocator.dupe(u8, tag_part) catch return null;
+                level_spec = parseLevelSpec(level_part);
+            }
+        } else {
+            // No colon, just tag pattern
+            tag_pattern = std.heap.page_allocator.dupe(u8, working_str) catch return null;
+        }
+
+        return FilterEntry{
+            .tag_pattern = tag_pattern,
+            .level_spec = level_spec,
+            .exclude_tag = exclude_tag,
+        };
+    }
+
+    fn parseLevelSpec(level_str: []const u8) ?LevelSpec {
+        if (level_str.len == 0) return null;
+
+        var mode: LevelFilterMode = .exact;
+        var level_name: []const u8 = level_str;
+
+        // Handle negation (!level, !level+, !level-)
+        if (std.mem.startsWith(u8, level_str, "!")) {
+            level_name = level_str[1..];
+            if (std.mem.endsWith(u8, level_name, "+")) {
+                mode = .not_plus;
+                level_name = level_name[0 .. level_name.len - 1];
+            } else if (std.mem.endsWith(u8, level_name, "-")) {
+                mode = .not_minus;
+                level_name = level_name[0 .. level_name.len - 1];
+            } else {
+                mode = .not_exact;
+            }
+        } else {
+            // Handle positive modes (level, level+, level-)
+            if (std.mem.endsWith(u8, level_name, "+")) {
+                mode = .plus;
+                level_name = level_name[0 .. level_name.len - 1];
+            } else if (std.mem.endsWith(u8, level_name, "-")) {
+                mode = .minus;
+                level_name = level_name[0 .. level_name.len - 1];
+            }
+        }
+
+        // Parse level name
+        const level = parseLogLevel(level_name) orelse return null;
+
+        return LevelSpec{
+            .level = level,
+            .mode = mode,
+        };
+    }
+
+    fn parseLogLevel(level_name: []const u8) ?LogLevel {
+        if (std.mem.eql(u8, level_name, "debug") or std.mem.eql(u8, level_name, "dbg")) {
+            return .debug;
+        } else if (std.mem.eql(u8, level_name, "info")) {
+            return .info;
+        } else if (std.mem.eql(u8, level_name, "warn")) {
+            return .warn;
+        } else if (std.mem.eql(u8, level_name, "err") or std.mem.eql(u8, level_name, "error")) {
+            return .err;
+        }
+        return null;
     }
 
     pub fn shouldLog(self: *LogBackend, level: LogLevel, tag: []const u8) bool {
         // Build mode check
         if (builtin.mode != .Debug and level != .err) return false;
 
-        // Tag filtering with include/exclude support
+        // Tag and level filtering
         self.ensureFilterLoaded();
         if (self.filter) |f| {
             if (f.len == 0) return true;
 
             var has_includes = false;
             var included = false;
+            var level_allowed = true;
+            var active_level_spec: ?LevelSpec = null;
 
-            // First pass: check includes (patterns without !)
-            for (f.slice()) |pattern| {
-                if (!std.mem.startsWith(u8, pattern, "!")) {
+            // First pass: check includes (entries without exclude_tag)
+            // Process patterns in order - later patterns override earlier ones
+            for (f.slice()) |entry| {
+                if (!entry.exclude_tag) {
                     has_includes = true;
-                    if (self.tagMatches(tag, pattern)) {
+                    if (self.tagMatches(tag, entry.tag_pattern)) {
                         included = true;
-                        break;
+                        // Later patterns override earlier ones (most recent wins)
+                        if (entry.level_spec) |spec| {
+                            active_level_spec = spec;
+                        } else {
+                            // If no level spec, reset to default (allow all levels)
+                            active_level_spec = null;
+                        }
                     }
                 }
             }
@@ -88,21 +228,47 @@ pub const LogBackend = struct {
                 included = true;
             }
 
-            // Second pass: check excludes (patterns starting with !)
+            // Check level against the active level specification
+            if (active_level_spec) |spec| {
+                level_allowed = self.levelMatches(level, spec);
+            }
+
+            // Second pass: check excludes (entries with exclude_tag)
             if (included) {
-                for (f.slice()) |pattern| {
-                    if (std.mem.startsWith(u8, pattern, "!")) {
-                        const exclude_pattern = pattern[1..]; // Remove the !
-                        if (self.tagMatches(tag, exclude_pattern)) {
-                            return false; // Excluded
+                for (f.slice()) |entry| {
+                    if (entry.exclude_tag) {
+                        if (self.tagMatches(tag, entry.tag_pattern)) {
+                            return false; // Excluded entirely
                         }
                     }
                 }
             }
 
-            return included;
+            return included and level_allowed;
         }
         return true;
+    }
+
+    fn levelMatches(self: *LogBackend, level: LogLevel, spec: LevelSpec) bool {
+        _ = self; // Mark as used
+
+        const level_order = [_]LogLevel{ .debug, .info, .warn, .err };
+        const current_idx = for (level_order, 0..) |l, i| {
+            if (l == level) break i;
+        } else return false;
+
+        const spec_idx = for (level_order, 0..) |l, i| {
+            if (l == spec.level) break i;
+        } else return false;
+
+        return switch (spec.mode) {
+            .exact => level == spec.level,
+            .plus => current_idx >= spec_idx,
+            .minus => current_idx <= spec_idx,
+            .not_exact => level != spec.level,
+            .not_plus => current_idx < spec_idx,
+            .not_minus => current_idx > spec_idx,
+        };
     }
 
     pub fn tagMatches(self: *LogBackend, tag: []const u8, pattern: []const u8) bool {
@@ -134,10 +300,11 @@ pub const LogBackend = struct {
     }
 
     fn writeLog(self: *LogBackend, level: LogLevel, tag: []const u8, color: ?LogColor, show_timestamp: bool, show_level: bool, message: []const u8) void {
-        if (!self.shouldLog(level, tag)) return;
-
         self.mutex.lock();
         defer self.mutex.unlock();
+
+        // Check if we should log inside the mutex to avoid double acquisition
+        if (!self.shouldLogUnsafe(level, tag)) return;
 
         const actual_color = if (color) |c| colorCode(c) else levelToColor(level);
         const label = levelToLabel(level);
@@ -170,13 +337,79 @@ pub const LogBackend = struct {
         }
     }
 
+    // Add a new function that doesn't use the mutex (for internal use when mutex is already held)
+    pub fn shouldLogUnsafe(self: *LogBackend, level: LogLevel, tag: []const u8) bool {
+        // Build mode check
+        if (builtin.mode != .Debug and level != .err) return false;
+
+        // Tag and level filtering
+        self.ensureFilterLoadedUnsafe();
+        if (self.filter) |f| {
+            if (f.len == 0) return true;
+
+            var has_includes = false;
+            var included = false;
+            var level_allowed = true;
+            var active_level_spec: ?LevelSpec = null;
+
+            // First pass: check includes (entries without exclude_tag)
+            // Process patterns in order - later patterns override earlier ones
+            for (f.slice()) |entry| {
+                if (!entry.exclude_tag) {
+                    has_includes = true;
+                    if (self.tagMatches(tag, entry.tag_pattern)) {
+                        included = true;
+                        // Later patterns override earlier ones (most recent wins)
+                        if (entry.level_spec) |spec| {
+                            active_level_spec = spec;
+                        } else {
+                            // If no level spec, reset to default (allow all levels)
+                            active_level_spec = null;
+                        }
+                    }
+                }
+            }
+
+            // If no includes specified, default to included
+            if (!has_includes) {
+                included = true;
+            }
+
+            // Check level against the active level specification
+            if (active_level_spec) |spec| {
+                level_allowed = self.levelMatches(level, spec);
+            }
+
+            // Second pass: check excludes (entries with exclude_tag)
+            if (included) {
+                for (f.slice()) |entry| {
+                    if (entry.exclude_tag) {
+                        if (self.tagMatches(tag, entry.tag_pattern)) {
+                            return false; // Excluded entirely
+                        }
+                    }
+                }
+            }
+
+            return included and level_allowed;
+        }
+        return true;
+    }
+
+    // Add unsafe version that doesn't acquire mutex
+    fn ensureFilterLoadedUnsafe(self: *LogBackend) void {
+        if (self.filter != null) return;
+        self.reloadFilterUnsafe();
+    }
+
     fn writeHexdump(self: *LogBackend, tag: []const u8, color: ?LogColor, buf: []const u8, opts: HexdumpOptions) void {
         // Hexdump only works in debug mode
         if (builtin.mode != .Debug) return;
-        if (!self.shouldLog(.debug, tag)) return;
 
         self.mutex.lock();
         defer self.mutex.unlock();
+
+        if (!self.shouldLogUnsafe(.debug, tag)) return;
 
         const actual_color = if (color) |c| colorCode(c) else levelToColor(.debug);
         const reset = "\x1b[0m";

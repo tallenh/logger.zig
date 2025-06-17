@@ -49,10 +49,6 @@ pub const FilterEntry = struct {
     tag_pattern: []const u8,
     level_spec: ?LevelSpec = null,
     exclude_tag: bool = false, // true for !tag patterns
-
-    pub fn deinit(self: FilterEntry, allocator: std.mem.Allocator) void {
-        allocator.free(self.tag_pattern);
-    }
 };
 
 pub const LogOptions = struct {
@@ -78,6 +74,7 @@ pub const LogBackend = struct {
     show_global_timestamp: bool = false,
     show_global_level: bool = false,
     filter: ?std.BoundedArray(FilterEntry, FILTER_CAP) = null,
+    env_buf: ?[]u8 = null, // holds the raw ZIGLOG string for pattern slices
     filter_loaded: bool = false, // Optimization: avoid redundant environment checks
 
     fn ensureFilterLoaded(self: *LogBackend) void {
@@ -103,12 +100,12 @@ pub const LogBackend = struct {
     }
 
     fn reloadFilterUnsafe(self: *LogBackend) void {
-        // Clean up existing filter
-        if (self.filter) |f| {
-            for (f.slice()) |entry| {
-                entry.deinit(std.heap.page_allocator);
-            }
+        // Free previous environment buffer (also releases tag_pattern slices)
+        if (self.env_buf) |buf| {
+            std.heap.page_allocator.free(buf);
+            self.env_buf = null;
         }
+        // Reset filter
         self.filter = null;
 
         // In release mode, skip environment parsing for non-err levels
@@ -121,7 +118,8 @@ pub const LogBackend = struct {
             self.filter = std.BoundedArray(FilterEntry, FILTER_CAP){};
             return;
         };
-        defer std.heap.page_allocator.free(env);
+        // Keep env alive for the lifetime of the filter
+        self.env_buf = env;
 
         var list = std.BoundedArray(FilterEntry, FILTER_CAP){};
         var it = std.mem.splitSequence(u8, env, ",");
@@ -154,15 +152,13 @@ pub const LogBackend = struct {
             const level_part = working_str[colon_idx + 1 ..];
 
             // If excluding entire tag, ignore level part
-            if (exclude_tag) {
-                tag_pattern = std.heap.page_allocator.dupe(u8, tag_part) catch return null;
-            } else {
-                tag_pattern = std.heap.page_allocator.dupe(u8, tag_part) catch return null;
+            tag_pattern = tag_part;
+            if (!exclude_tag) {
                 level_spec = parseLevelSpec(level_part);
             }
         } else {
             // No colon, just tag pattern
-            tag_pattern = std.heap.page_allocator.dupe(u8, working_str) catch return null;
+            tag_pattern = working_str;
         }
 
         return FilterEntry{

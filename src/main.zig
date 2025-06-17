@@ -329,7 +329,9 @@ pub const LogBackend = struct {
         const label = levelToLabel(level);
         const reset = "\x1b[0m";
 
-        var out = switch (level) {
+        var out = if (builtin.is_test) blk: {
+            break :blk std.io.getStdErr().writer();
+        } else switch (level) {
             .err => if (builtin.mode == .Debug) std.io.getStdOut().writer() else std.io.getStdErr().writer(),
             else => std.io.getStdOut().writer(),
         };
@@ -435,7 +437,9 @@ pub const LogBackend = struct {
         const reset = "\x1b[0m";
         const label = "DEBUG";
 
-        var out = std.io.getStdOut().writer();
+        var out = if (builtin.is_test) blk: {
+            break :blk std.io.getStdErr().writer();
+        } else std.io.getStdOut().writer();
 
         const start = opts.start;
         if (start >= buf.len) return;

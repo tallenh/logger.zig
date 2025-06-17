@@ -1,6 +1,7 @@
 const std = @import("std");
 const testing = std.testing;
 const logger = @import("main.zig");
+const builtin = @import("builtin");
 
 test "basic logging" {
     std.debug.print("Testing basic logging...\n", .{});
@@ -656,4 +657,81 @@ fn cleanupBackend(backend: *logger.LogBackend) void {
             std.heap.page_allocator.free(entry.tag_pattern);
         }
     }
+}
+
+// Verify that the tag matching helper handles wildcard edge-cases correctly
+// (prefix, suffix, contains, and degenerate patterns).
+test "tag matching wildcard edge cases" {
+    var backend = logger.LogBackend{};
+
+    const cases = [_]struct {
+        pattern: []const u8,
+        tag: []const u8,
+        expected: bool,
+    }{
+        .{ .pattern = "*sub*", .tag = "my_sub_tag", .expected = true }, // contains
+        .{ .pattern = "*sub*", .tag = "mytag", .expected = false },
+        .{ .pattern = "*suffix", .tag = "abc_suffix", .expected = true }, // ends with
+        .{ .pattern = "*suffix", .tag = "suffix_abc", .expected = false },
+        .{ .pattern = "prefix*", .tag = "prefix_abc", .expected = true }, // starts with
+        .{ .pattern = "prefix*", .tag = "abc_prefix", .expected = false },
+        .{ .pattern = "*", .tag = "anything", .expected = true }, // single star matches all
+        .{ .pattern = "**", .tag = "anything", .expected = true }, // double star behaves the same
+    };
+
+    for (cases) |c| {
+        const result = backend.tagMatches(c.tag, c.pattern);
+        try std.testing.expectEqual(@as(bool, c.expected), result);
+    }
+}
+
+// Ensure that attempts to push more than FILTER_CAP patterns into the
+// internal BoundedArray do not crash and cap the length to FILTER_CAP.
+test "filter capacity overflow" {
+    var list = std.BoundedArray(logger.FilterEntry, logger.FILTER_CAP){};
+    var i: usize = 0;
+    while (i < logger.FILTER_CAP + 5) : (i += 1) {
+        const entry = logger.FilterEntry{
+            .tag_pattern = "tag", // slice literal – no allocation needed
+            .exclude_tag = false,
+        };
+        // append may fail when capacity is exceeded – ignore error
+        _ = list.append(entry) catch {};
+    }
+    try std.testing.expectEqual(logger.FILTER_CAP, list.len);
+}
+
+// Invalid level strings in the filter should be ignored, while valid ones
+// continue to work.
+test "invalid pattern parts are skipped" {
+    var backend = logger.LogBackend{};
+
+    // Construct env string with one bogus and one valid entry.
+    const env_str = "*:bogus,*:info";
+
+    // Manually parse using production helper to stay close to real path.
+    var it = std.mem.splitSequence(u8, env_str, ",");
+    var list = std.BoundedArray(logger.FilterEntry, logger.FILTER_CAP){};
+    while (it.next()) |part| {
+        const trimmed = std.mem.trim(u8, part, " \t");
+        if (trimmed.len == 0) continue;
+        if (parseFilterEntry(trimmed)) |fe| {
+            list.append(fe) catch {};
+        }
+    }
+    backend.filter = list;
+    backend.filter_loaded = true;
+
+    try std.testing.expectEqual(false, backend.shouldLogUnsafe(.debug, "app")); // debug blocked (no rule)
+    try std.testing.expectEqual(true, backend.shouldLogUnsafe(.info, "app")); // info allowed by second rule
+}
+
+// Hexdump with non-default options should run without crashing and report the
+// expected byte count (returned via stdout length can be approximated by
+// capturing start/end indices but here we simply ensure call compiles).
+test "hexdump option matrix" {
+    if (builtin.mode != .Debug) return; // hexdump only active in debug builds
+    const log = logger.new(.{ .tag = "hex_test" });
+    const buf = "0123456789abcdefghijklmnopqrstuvwxyz";
+    log.hexdump(buf, .{ .decimal_offset = true, .start = 8, .length = 24 });
 }

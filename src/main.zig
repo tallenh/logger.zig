@@ -75,7 +75,7 @@ pub const LogBackend = struct {
     show_global_level: bool = false,
     filter: ?std.BoundedArray(FilterEntry, FILTER_CAP) = null,
     env_buf: ?[]u8 = null, // holds the raw ZIGLOG string for pattern slices
-    filter_loaded: bool = false, // Optimization: avoid redundant environment checks
+    filter_loaded: bool = false,
 
     fn ensureFilterLoaded(self: *LogBackend) void {
         // Fast path: check if already loaded without lock

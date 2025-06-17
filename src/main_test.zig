@@ -260,6 +260,7 @@ test "NOT operator filtering" {
             filter_list.append(filter_entry) catch continue;
         }
         backend.filter = filter_list;
+        backend.filter_loaded = true; // Mark filter as loaded for the test
 
         const result = backend.shouldLogUnsafe(case.level, case.tag);
 
@@ -541,6 +542,7 @@ test "level filtering - edge cases" {
 fn parsePattern(backend: *logger.LogBackend, pattern: []const u8) bool {
     if (pattern.len == 0) {
         backend.filter = std.BoundedArray(logger.FilterEntry, 16){};
+        backend.filter_loaded = true;
         return true;
     }
 
@@ -557,6 +559,7 @@ fn parsePattern(backend: *logger.LogBackend, pattern: []const u8) bool {
     }
 
     backend.filter = list;
+    backend.filter_loaded = true;
     return true;
 }
 

@@ -1,7 +1,17 @@
 const std = @import("std");
 const builtin = @import("builtin");
 
-pub const LogLevel = enum { debug, info, warn, err };
+pub const LogLevel = enum(u8) {
+    debug = 0,
+    info = 1,
+    warn = 2,
+    err = 3,
+
+    // Compile-time level comparison optimization
+    pub fn cmp(self: LogLevel, other: LogLevel) std.math.Order {
+        return std.math.order(@intFromEnum(self), @intFromEnum(other));
+    }
+};
 
 pub const LogColor = enum {
     red,
@@ -48,6 +58,14 @@ pub const LogOptions = struct {
     show_level: bool = false,
 };
 
+// Compile-time optimization: in release mode, skip all filtering except err level
+inline fn shouldCompileLog(comptime level: LogLevel) bool {
+    return switch (builtin.mode) {
+        .Debug => true,
+        else => level == .err,
+    };
+}
+
 // Centralized logging backend - handles all I/O and synchronization
 pub const LogBackend = struct {
     mutex: std.Thread.Mutex = .{},
@@ -55,25 +73,28 @@ pub const LogBackend = struct {
     show_global_timestamp: bool = false,
     show_global_level: bool = false,
     filter: ?std.BoundedArray(FilterEntry, 16) = null,
+    filter_loaded: bool = false, // Optimization: avoid redundant environment checks
 
     fn ensureFilterLoaded(self: *LogBackend) void {
-        // First check without lock for performance
-        if (self.filter != null) return;
+        // Fast path: check if already loaded without lock
+        if (self.filter_loaded) return;
 
-        // Double-checked locking pattern for thread safety
+        // Slow path: double-checked locking pattern for thread safety
         self.mutex.lock();
         defer self.mutex.unlock();
 
         // Check again after acquiring lock
-        if (self.filter != null) return;
+        if (self.filter_loaded) return;
 
         self.reloadFilterUnsafe();
+        self.filter_loaded = true;
     }
 
     pub fn reloadFilter(self: *LogBackend) void {
         self.mutex.lock();
         defer self.mutex.unlock();
         self.reloadFilterUnsafe();
+        self.filter_loaded = true;
     }
 
     fn reloadFilterUnsafe(self: *LogBackend) void {
@@ -84,6 +105,12 @@ pub const LogBackend = struct {
             }
         }
         self.filter = null;
+
+        // In release mode, skip environment parsing for non-err levels
+        if (builtin.mode != .Debug) {
+            self.filter = std.BoundedArray(FilterEntry, 16){};
+            return;
+        }
 
         const env = std.process.getEnvVarOwned(std.heap.page_allocator, "ZIGLOG") catch {
             self.filter = std.BoundedArray(FilterEntry, 16){};
@@ -192,10 +219,10 @@ pub const LogBackend = struct {
     }
 
     pub fn shouldLog(self: *LogBackend, level: LogLevel, tag: []const u8) bool {
-        // Build mode check
+        // Compile-time optimization: in release mode, only err logs are processed
         if (builtin.mode != .Debug and level != .err) return false;
 
-        // Tag and level filtering
+        // Debug mode: full filtering logic
         self.ensureFilterLoaded();
         if (self.filter) |f| {
             if (f.len == 0) return true;
@@ -252,29 +279,21 @@ pub const LogBackend = struct {
     fn levelMatches(self: *LogBackend, level: LogLevel, spec: LevelSpec) bool {
         _ = self; // Mark as used
 
-        const level_order = [_]LogLevel{ .debug, .info, .warn, .err };
-        const current_idx = for (level_order, 0..) |l, i| {
-            if (l == level) break i;
-        } else return false;
-
-        const spec_idx = for (level_order, 0..) |l, i| {
-            if (l == spec.level) break i;
-        } else return false;
-
+        // Optimized level comparison using enum ordering
         return switch (spec.mode) {
             .exact => level == spec.level,
-            .plus => current_idx >= spec_idx,
-            .minus => current_idx <= spec_idx,
+            .plus => level.cmp(spec.level) != .lt,
+            .minus => level.cmp(spec.level) != .gt,
             .not_exact => level != spec.level,
-            .not_plus => current_idx < spec_idx,
-            .not_minus => current_idx > spec_idx,
+            .not_plus => level.cmp(spec.level) == .lt,
+            .not_minus => level.cmp(spec.level) == .gt,
         };
     }
 
     pub fn tagMatches(self: *LogBackend, tag: []const u8, pattern: []const u8) bool {
         _ = self; // Mark as used
 
-        // Exact match (no wildcards)
+        // Exact match (no wildcards) - most common case
         if (std.mem.indexOf(u8, pattern, "*") == null) {
             return std.mem.eql(u8, pattern, tag);
         }
@@ -339,10 +358,10 @@ pub const LogBackend = struct {
 
     // Add a new function that doesn't use the mutex (for internal use when mutex is already held)
     pub fn shouldLogUnsafe(self: *LogBackend, level: LogLevel, tag: []const u8) bool {
-        // Build mode check
+        // Compile-time optimization: in release mode, only err logs are processed
         if (builtin.mode != .Debug and level != .err) return false;
 
-        // Tag and level filtering
+        // Debug mode: full filtering logic
         self.ensureFilterLoadedUnsafe();
         if (self.filter) |f| {
             if (f.len == 0) return true;
@@ -398,12 +417,13 @@ pub const LogBackend = struct {
 
     // Add unsafe version that doesn't acquire mutex
     fn ensureFilterLoadedUnsafe(self: *LogBackend) void {
-        if (self.filter != null) return;
+        if (self.filter_loaded) return;
         self.reloadFilterUnsafe();
+        self.filter_loaded = true;
     }
 
     fn writeHexdump(self: *LogBackend, tag: []const u8, color: ?LogColor, buf: []const u8, opts: HexdumpOptions) void {
-        // Hexdump only works in debug mode
+        // Hexdump only works in debug mode - compile-time optimization
         if (builtin.mode != .Debug) return;
 
         self.mutex.lock();
@@ -511,24 +531,34 @@ pub const Logger = struct {
     config: LogOptions,
 
     pub fn info(self: Logger, comptime fmt: []const u8, args: anytype) void {
+        // Compile-time optimization: compile out non-err logs in release mode
+        if (!shouldCompileLog(.info)) return;
+
         var buf: [1024]u8 = undefined;
         const message = std.fmt.bufPrint(&buf, fmt, args) catch "FORMAT_ERROR";
         backend.writeLog(.info, self.config.tag, self.config.color, self.config.show_timestamp, self.config.show_level, message);
     }
 
     pub fn warn(self: Logger, comptime fmt: []const u8, args: anytype) void {
+        // Compile-time optimization: compile out non-err logs in release mode
+        if (!shouldCompileLog(.warn)) return;
+
         var buf: [1024]u8 = undefined;
         const message = std.fmt.bufPrint(&buf, fmt, args) catch "FORMAT_ERROR";
         backend.writeLog(.warn, self.config.tag, self.config.color, self.config.show_timestamp, self.config.show_level, message);
     }
 
     pub fn err(self: Logger, comptime fmt: []const u8, args: anytype) void {
+        // Error logs are always compiled in
         var buf: [1024]u8 = undefined;
         const message = std.fmt.bufPrint(&buf, fmt, args) catch "FORMAT_ERROR";
         backend.writeLog(.err, self.config.tag, self.config.color, self.config.show_timestamp, self.config.show_level, message);
     }
 
     pub fn dbg(self: Logger, comptime fmt: []const u8, args: anytype) void {
+        // Compile-time optimization: compile out non-err logs in release mode
+        if (!shouldCompileLog(.debug)) return;
+
         var buf: [1024]u8 = undefined;
         const message = std.fmt.bufPrint(&buf, fmt, args) catch "FORMAT_ERROR";
         backend.writeLog(.debug, self.config.tag, self.config.color, self.config.show_timestamp, self.config.show_level, message);
@@ -542,16 +572,13 @@ pub const Logger = struct {
     }
 
     pub fn hexdump(self: Logger, buf: []const u8, opts: HexdumpOptions) void {
+        // Compile-time optimization: compile out hexdump in release mode
+        if (!shouldCompileLog(.debug)) return;
+
         backend.writeHexdump(self.config.tag, self.config.color, buf, opts);
     }
 
     pub fn block(self: Logger, label: []const u8) BlockLogger {
-        const open_line = std.fmt.allocPrint(std.heap.page_allocator, "============={s}=============\n", .{label}) catch return BlockLogger{
-            .logger = self,
-            .label = label,
-        };
-        defer std.heap.page_allocator.free(open_line);
-        self.info("{s}", .{open_line});
         return BlockLogger{
             .logger = self,
             .label = label,
@@ -564,10 +591,12 @@ pub const BlockLogger = struct {
     label: []const u8,
 
     pub fn info(self: BlockLogger, comptime fmt: []const u8, args: anytype) void {
+        if (!shouldCompileLog(.info)) return;
         self.logger.info(fmt, args);
     }
 
     pub fn warn(self: BlockLogger, comptime fmt: []const u8, args: anytype) void {
+        if (!shouldCompileLog(.warn)) return;
         self.logger.warn(fmt, args);
     }
 
@@ -576,18 +605,18 @@ pub const BlockLogger = struct {
     }
 
     pub fn dbg(self: BlockLogger, comptime fmt: []const u8, args: anytype) void {
+        if (!shouldCompileLog(.debug)) return;
         self.logger.dbg(fmt, args);
     }
 
     pub fn hexdump(self: BlockLogger, buf: []const u8) void {
+        if (!shouldCompileLog(.debug)) return;
         self.logger.hexdump(buf, .{});
     }
 
     pub fn close(self: BlockLogger, msg: []const u8) void {
-        self.logger.info("{s}\n", .{msg});
-        const close_line = std.fmt.allocPrint(std.heap.page_allocator, "===========end {s}=============\n", .{self.label}) catch return;
-        defer std.heap.page_allocator.free(close_line);
-        self.logger.info("{s}", .{close_line});
+        if (!shouldCompileLog(.info)) return;
+        self.logger.info("{s}", .{msg});
     }
 };
 

@@ -524,13 +524,16 @@ pub const Logger = struct {
 
         var logger = Logger{ .config = undefined };
 
-        // Copy tag into internal buffer and remember length.
+        // Copy tag into internal buffer in a way that works in both
+        // compile-time and run-time contexts.
         logger.tag_len = base_cfg.tag.len;
-        std.mem.copyForwards(u8, logger.tag_buf[0..logger.tag_len], base_cfg.tag);
+        for (base_cfg.tag, 0..) |ch, idx| {
+            logger.tag_buf[idx] = ch;
+        }
 
         // Materialise the final config pointing at the slice inside tag_buf.
         logger.config = LogOptions{
-            .tag = logger.tag_buf[0..logger.tag_len],
+            .tag = base_cfg.tag,
             .color = base_cfg.color,
             .file = base_cfg.file,
             .show_timestamp = base_cfg.show_timestamp,
@@ -619,34 +622,27 @@ pub const Logger = struct {
     /// allocation is required, preserving the "stack-only" nature of
     /// `Logger`.
     pub fn chain(self: Logger, override_config: LogOptionsPartial) Logger {
-        var tag_buf: [MAX_TAG_LEN]u8 = undefined;
         const parent_tag = self.tag();
-
-        // If caller did not supply a tag override, `chain` is equivalent to
-        // `new`.
-        if (override_config.tag == null) {
-            return self.new(override_config);
-        }
-
         const child_tag = override_config.tag.?;
-
         const needed_len = parent_tag.len + 1 + child_tag.len;
         std.debug.assert(needed_len <= MAX_TAG_LEN);
 
-        // Build "parent.child" into the temporary buffer.
-        std.mem.copyForwards(u8, tag_buf[0..parent_tag.len], parent_tag);
-        tag_buf[parent_tag.len] = '.';
-        std.mem.copyForwards(u8, tag_buf[parent_tag.len + 1 .. needed_len], child_tag);
-
-        const joined_slice = tag_buf[0..needed_len];
-
-        return Logger.init(LogOptions{
-            .tag = joined_slice,
+        var result = Logger.init(LogOptions{
+            .tag = "", // temporary, will be fixed below
             .color = override_config.color orelse self.config.color,
             .file = override_config.file orelse self.config.file,
             .show_timestamp = override_config.show_timestamp orelse self.config.show_timestamp,
             .show_level = override_config.show_level orelse self.config.show_level,
         });
+
+        // Copy parent.child into the new logger's own buffer.
+        std.mem.copyForwards(u8, result.tag_buf[0..parent_tag.len], parent_tag);
+        result.tag_buf[parent_tag.len] = '.';
+        std.mem.copyForwards(u8, result.tag_buf[parent_tag.len + 1 .. needed_len], child_tag);
+
+        result.tag_len = needed_len;
+
+        return result;
     }
 
     /// Return the current tag slice backed by this logger's internal buffer.

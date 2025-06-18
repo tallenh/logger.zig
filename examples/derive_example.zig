@@ -1,9 +1,19 @@
 const std = @import("std");
 const logger = @import("logger");
+const mod_logger = @import("logger").new(.{
+    .tag = "mod",
+    .color = .red,
+    .show_timestamp = true,
+});
+const chained_logger = mod_logger.chain(.{ .tag = "chained" });
 
 /// Demonstrates how to derive new loggers from an existing one using
 /// `Logger.new()` and how to build hierarchical tags with `Logger.chain()`.
 pub fn main() !void {
+    // Use the module logger
+    mod_logger.info("Module logger info", .{});
+    chained_logger.info("Chained logger info", .{});
+
     // Base logger
     const base = logger.new(.{
         .tag = "base",

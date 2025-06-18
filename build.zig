@@ -76,4 +76,21 @@ pub fn build(b: *std.Build) void {
 
     const thread_test_step = b.step("thread-test", "Test thread safety");
     thread_test_step.dependOn(&run_thread_test.step);
+
+    // Derive example (demonstrates Logger.new and Logger.chain)
+    const derive_example = b.addExecutable(.{
+        .name = "derive_example",
+        .root_source_file = b.path("examples/derive_example.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    derive_example.root_module.addImport("logger", logger_module);
+
+    const run_derive = b.addRunArtifact(derive_example);
+    if (b.args) |args| {
+        run_derive.addArgs(args);
+    }
+
+    const derive_step = b.step("derive", "Run derive example");
+    derive_step.dependOn(&run_derive.step);
 }

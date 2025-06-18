@@ -117,8 +117,11 @@ test "hexdump options" {
 }
 
 fn workerThread(thread_id: u32) void {
-    const log = logger.new(.{ .tag = std.fmt.allocPrint(std.heap.page_allocator, "T{d}", .{thread_id}) catch "THREAD" });
-    defer if (!std.mem.eql(u8, log.config.tag, "THREAD")) std.heap.page_allocator.free(log.config.tag);
+    const tmp_tag = std.fmt.allocPrint(std.heap.page_allocator, "T{d}", .{thread_id}) catch "THREAD";
+    const log = logger.new(.{ .tag = tmp_tag });
+    if (!std.mem.eql(u8, tmp_tag, "THREAD")) {
+        std.heap.page_allocator.free(tmp_tag);
+    }
 
     var i: u32 = 0;
     while (i < 3) : (i += 1) {
@@ -734,4 +737,68 @@ test "hexdump option matrix" {
     const log = logger.new(.{ .tag = "hex_test" });
     const buf = "0123456789abcdefghijklmnopqrstuvwxyz";
     log.hexdump(buf, .{ .decimal_offset = true, .start = 8, .length = 24 });
+}
+
+test "logger instance new functionality" {
+    std.debug.print("Testing logger instance new functionality...\n", .{});
+
+    // Create a base logger
+    const base_log = logger.new(.{
+        .tag = "base",
+        .color = .blue,
+        .show_timestamp = true,
+        .show_level = false,
+    });
+
+    // Test partial override - only change tag
+    const log1 = base_log.new(.{
+        .tag = "modified",
+    });
+    try std.testing.expectEqualStrings("modified", log1.tag());
+    try std.testing.expectEqual(@as(?logger.LogColor, .blue), log1.config.color);
+    try std.testing.expectEqual(true, log1.config.show_timestamp);
+    try std.testing.expectEqual(false, log1.config.show_level);
+
+    // Test multiple field override
+    const log2 = base_log.new(.{
+        .color = .red,
+        .show_level = true,
+    });
+    try std.testing.expectEqualStrings("base", log2.tag());
+    try std.testing.expectEqual(@as(?logger.LogColor, .red), log2.config.color);
+    try std.testing.expectEqual(true, log2.config.show_timestamp);
+    try std.testing.expectEqual(true, log2.config.show_level);
+
+    // Test overriding boolean to false
+    const log3 = base_log.new(.{
+        .show_timestamp = false,
+    });
+    try std.testing.expectEqualStrings("base", log3.tag());
+    try std.testing.expectEqual(@as(?logger.LogColor, .blue), log3.config.color);
+    try std.testing.expectEqual(false, log3.config.show_timestamp);
+    try std.testing.expectEqual(false, log3.config.show_level);
+
+    // Test chaining withConfig calls
+    const log4 = base_log.new(.{ .tag = "chain1" }).new(.{ .color = .green });
+    try std.testing.expectEqualStrings("chain1", log4.tag());
+    try std.testing.expectEqual(@as(?logger.LogColor, .green), log4.config.color);
+    try std.testing.expectEqual(true, log4.config.show_timestamp);
+    try std.testing.expectEqual(false, log4.config.show_level);
+
+    // Test that the original logger is unchanged
+    try std.testing.expectEqualStrings("base", base_log.tag());
+    try std.testing.expectEqual(@as(?logger.LogColor, .blue), base_log.config.color);
+    try std.testing.expectEqual(true, base_log.config.show_timestamp);
+    try std.testing.expectEqual(false, base_log.config.show_level);
+
+    std.debug.print("logger instance new functionality test completed\n", .{});
+}
+
+// Verify that `chain` concatenates tags while inheriting other fields.
+test "chain functionality" {
+    const base = logger.new(.{ .tag = "parent", .color = .yellow });
+    const chained = base.chain(.{ .tag = "child" });
+
+    try std.testing.expectEqualStrings("parent.child", chained.tag());
+    try std.testing.expectEqual(@as(?logger.LogColor, .yellow), chained.config.color);
 }

@@ -6,6 +6,11 @@ const builtin = @import("builtin");
 /// capacity without touching the core implementation.
 pub const FILTER_CAP: usize = 16;
 
+/// Maximum length (in bytes) of a logger tag that can be stored directly in a
+/// `Logger` instance without any heap allocation.  Longer tags will cause a
+/// runtime assertion failure when constructing the logger.
+pub const MAX_TAG_LEN: usize = 128;
+
 pub const LogLevel = enum(u8) {
     debug = 0,
     info = 1,
@@ -57,6 +62,14 @@ pub const LogOptions = struct {
     file: ?std.fs.File = null,
     show_timestamp: bool = false,
     show_level: bool = false,
+};
+
+pub const LogOptionsPartial = struct {
+    tag: ?[]const u8 = null,
+    color: ?LogColor = null,
+    file: ?std.fs.File = null,
+    show_timestamp: ?bool = null,
+    show_level: ?bool = null,
 };
 
 // Compile-time optimization: in release mode, skip all filtering except err level
@@ -493,11 +506,39 @@ pub fn setGlobalLevel(enabled: bool) void {
 }
 
 pub fn new(config: LogOptions) Logger {
-    return Logger{ .config = config };
+    return Logger.init(config);
 }
 
 pub const Logger = struct {
+    // Fixed-size storage for the tag slice – avoids any heap allocation and
+    // keeps the whole logger as a stack value.
+    tag_buf: [MAX_TAG_LEN]u8 = undefined,
+    tag_len: usize = 0,
+
     config: LogOptions,
+
+    /// Internal helper that creates a logger, copying the provided tag into
+    /// the embedded buffer.  Panics if the tag is longer than MAX_TAG_LEN.
+    pub fn init(base_cfg: LogOptions) Logger {
+        std.debug.assert(base_cfg.tag.len <= MAX_TAG_LEN);
+
+        var logger = Logger{ .config = undefined };
+
+        // Copy tag into internal buffer and remember length.
+        logger.tag_len = base_cfg.tag.len;
+        std.mem.copyForwards(u8, logger.tag_buf[0..logger.tag_len], base_cfg.tag);
+
+        // Materialise the final config pointing at the slice inside tag_buf.
+        logger.config = LogOptions{
+            .tag = logger.tag_buf[0..logger.tag_len],
+            .color = base_cfg.color,
+            .file = base_cfg.file,
+            .show_timestamp = base_cfg.show_timestamp,
+            .show_level = base_cfg.show_level,
+        };
+
+        return logger;
+    }
 
     pub fn info(self: Logger, comptime fmt: []const u8, args: anytype) void {
         // Compile-time optimization: compile out non-err logs in release mode
@@ -505,7 +546,7 @@ pub const Logger = struct {
 
         var buf: [1024]u8 = undefined;
         const message = std.fmt.bufPrint(&buf, fmt, args) catch "FORMAT_ERROR";
-        backend.writeLog(.info, self.config.tag, self.config.color, self.config.show_timestamp, self.config.show_level, message);
+        backend.writeLog(.info, self.tag(), self.config.color, self.config.show_timestamp, self.config.show_level, message);
     }
 
     pub fn warn(self: Logger, comptime fmt: []const u8, args: anytype) void {
@@ -514,14 +555,14 @@ pub const Logger = struct {
 
         var buf: [1024]u8 = undefined;
         const message = std.fmt.bufPrint(&buf, fmt, args) catch "FORMAT_ERROR";
-        backend.writeLog(.warn, self.config.tag, self.config.color, self.config.show_timestamp, self.config.show_level, message);
+        backend.writeLog(.warn, self.tag(), self.config.color, self.config.show_timestamp, self.config.show_level, message);
     }
 
     pub fn err(self: Logger, comptime fmt: []const u8, args: anytype) void {
         // Error logs are always compiled in
         var buf: [1024]u8 = undefined;
         const message = std.fmt.bufPrint(&buf, fmt, args) catch "FORMAT_ERROR";
-        backend.writeLog(.err, self.config.tag, self.config.color, self.config.show_timestamp, self.config.show_level, message);
+        backend.writeLog(.err, self.tag(), self.config.color, self.config.show_timestamp, self.config.show_level, message);
     }
 
     pub fn dbg(self: Logger, comptime fmt: []const u8, args: anytype) void {
@@ -530,13 +571,13 @@ pub const Logger = struct {
 
         var buf: [1024]u8 = undefined;
         const message = std.fmt.bufPrint(&buf, fmt, args) catch "FORMAT_ERROR";
-        backend.writeLog(.debug, self.config.tag, self.config.color, self.config.show_timestamp, self.config.show_level, message);
+        backend.writeLog(.debug, self.tag(), self.config.color, self.config.show_timestamp, self.config.show_level, message);
     }
 
     pub fn fatal(self: Logger, comptime fmt: []const u8, args: anytype) noreturn {
         var buf: [1024]u8 = undefined;
         const message = std.fmt.bufPrint(&buf, fmt, args) catch "FORMAT_ERROR";
-        backend.writeLog(.err, self.config.tag, self.config.color, self.config.show_timestamp, self.config.show_level, message);
+        backend.writeLog(.err, self.tag(), self.config.color, self.config.show_timestamp, self.config.show_level, message);
         std.process.exit(1);
     }
 
@@ -544,7 +585,7 @@ pub const Logger = struct {
         // Compile-time optimization: compile out hexdump in release mode
         if (!shouldCompileLog(.debug)) return;
 
-        backend.writeHexdump(self.config.tag, self.config.color, buf, opts);
+        backend.writeHexdump(self.tag(), self.config.color, buf, opts);
     }
 
     pub fn block(self: Logger, label: []const u8) BlockLogger {
@@ -552,6 +593,65 @@ pub const Logger = struct {
             .logger = self,
             .label = label,
         };
+    }
+
+    /// Create a *new* logger derived from the current one, overriding only
+    /// the fields explicitly set in `override_config`.  The `tag` provided
+    /// here *replaces* the parent tag.  Use `chain()` instead if you want to
+    /// append to the existing tag.
+    pub fn new(self: Logger, override: LogOptionsPartial) Logger {
+        return Logger.init(LogOptions{
+            .tag = override.tag orelse self.tag(),
+            .color = override.color orelse self.config.color,
+            .file = override.file orelse self.config.file,
+            .show_timestamp = override.show_timestamp orelse self.config.show_timestamp,
+            .show_level = override.show_level orelse self.config.show_level,
+        });
+    }
+
+    /// Create a new logger that "chains" its configuration onto the current
+    /// one.  Non-null fields in `override_config` still override the existing
+    /// values *except* for `tag`: when a new tag is supplied it is **joined**
+    /// onto the existing tag using a dot separator (e.g. "parent.child").
+    ///
+    /// The function is meant to be used with *compile-time* `override_config`
+    /// so that any tag concatenation happens at compile time and no heap
+    /// allocation is required, preserving the "stack-only" nature of
+    /// `Logger`.
+    pub fn chain(self: Logger, override_config: LogOptionsPartial) Logger {
+        var tag_buf: [MAX_TAG_LEN]u8 = undefined;
+        const parent_tag = self.tag();
+
+        // If caller did not supply a tag override, `chain` is equivalent to
+        // `new`.
+        if (override_config.tag == null) {
+            return self.new(override_config);
+        }
+
+        const child_tag = override_config.tag.?;
+
+        const needed_len = parent_tag.len + 1 + child_tag.len;
+        std.debug.assert(needed_len <= MAX_TAG_LEN);
+
+        // Build "parent.child" into the temporary buffer.
+        std.mem.copyForwards(u8, tag_buf[0..parent_tag.len], parent_tag);
+        tag_buf[parent_tag.len] = '.';
+        std.mem.copyForwards(u8, tag_buf[parent_tag.len + 1 .. needed_len], child_tag);
+
+        const joined_slice = tag_buf[0..needed_len];
+
+        return Logger.init(LogOptions{
+            .tag = joined_slice,
+            .color = override_config.color orelse self.config.color,
+            .file = override_config.file orelse self.config.file,
+            .show_timestamp = override_config.show_timestamp orelse self.config.show_timestamp,
+            .show_level = override_config.show_level orelse self.config.show_level,
+        });
+    }
+
+    /// Return the current tag slice backed by this logger's internal buffer.
+    pub fn tag(self: *const Logger) []const u8 {
+        return self.tag_buf[0..self.tag_len];
     }
 };
 

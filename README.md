@@ -78,6 +78,47 @@ const data = "Hello, World!";
 custom_log.hexdump(data, .{});
 ```
 
+## Logger Configuration Merging
+
+The `withConfig` method allows you to create a new logger by merging configurations. This is useful for creating specialized loggers that inherit most settings from a base logger while overriding specific fields:
+
+```zig
+// Create a base logger
+const base_log = logger.new(.{
+    .tag = "app",
+    .color = .blue,
+    .show_timestamp = true,
+    .show_level = false,
+});
+
+// Create specialized loggers by merging configs
+const db_log = base_log.withConfig(.{
+    .tag = "database",  // Override tag
+    .color = .green,    // Override color
+    // show_timestamp and show_level inherit from base_log
+});
+
+const api_log = base_log.withConfig(.{
+    .tag = "api",
+    .show_level = true,  // Override to show levels
+    // Other fields inherit from base_log
+});
+
+// Chain multiple withConfig calls
+const debug_log = base_log
+    .withConfig(.{ .tag = "debug" })
+    .withConfig(.{ .color = .red })
+    .withConfig(.{ .show_timestamp = false });
+
+// Original logger remains unchanged
+base_log.info("Base logger unchanged", .{});      // [1234567890] [app]: Base logger unchanged
+db_log.info("Database operation", .{});          // [1234567890] [database]: Database operation
+api_log.info("API request", .{});               // [1234567890] [api] INFO : API request
+debug_log.info("Debug info", .{});              // [debug]: Debug info
+```
+
+The `withConfig` method uses a `LogOptionsPartial` struct where all fields are optional. Only the fields you specify will override the original configuration - unspecified fields keep their original values.
+
 ## Log Level Display
 
 By default, log levels (INFO, WARN, ERROR, DEBUG) are **not** displayed in the output for cleaner logs. You can enable them per logger or globally:

@@ -591,6 +591,24 @@ pub const Logger = struct {
         backend.writeHexdump(self.tag(), self.config.color, buf, opts);
     }
 
+    pub fn dump(self: Logger, filename: []const u8, buf: []const u8) void {
+        // Compile-time optimization: compile out dump in release mode
+        if (!shouldCompileLog(.debug)) return;
+
+        const file = std.fs.cwd().createFile(filename, .{}) catch |create_err| {
+            self.err("Failed to create dump file '{s}': {}", .{ filename, create_err });
+            return;
+        };
+        defer file.close();
+
+        file.writeAll(buf) catch |write_err| {
+            self.err("Failed to write to dump file '{s}': {}", .{ filename, write_err });
+            return;
+        };
+
+        self.dbg("Dumped {} bytes to file '{s}'", .{ buf.len, filename });
+    }
+
     pub fn block(self: Logger, label: []const u8) BlockLogger {
         return BlockLogger{
             .logger = self,
@@ -677,6 +695,11 @@ pub const BlockLogger = struct {
     pub fn hexdump(self: BlockLogger, buf: []const u8) void {
         if (!shouldCompileLog(.debug)) return;
         self.logger.hexdump(buf, .{});
+    }
+
+    pub fn dump(self: BlockLogger, filename: []const u8, buf: []const u8) void {
+        if (!shouldCompileLog(.debug)) return;
+        self.logger.dump(filename, buf);
     }
 
     pub fn close(self: BlockLogger, msg: []const u8) void {

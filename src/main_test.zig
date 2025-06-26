@@ -802,3 +802,82 @@ test "chain functionality" {
     try std.testing.expectEqualStrings("parent.child", chained.tag());
     try std.testing.expectEqual(@as(?logger.LogColor, .yellow), chained.config.color);
 }
+
+test "dump functionality" {
+    std.debug.print("Testing dump functionality...\n", .{});
+    
+    const test_data = "Hello, World! This is test data for the dump function.";
+    const filename = "test_dump.bin";
+    
+    // Create logger and dump data to file
+    const log = logger.new(.{ .tag = "dump_test" });
+    log.dump(filename, test_data);
+    
+    // Verify file exists and has correct size
+    const file = std.fs.cwd().openFile(filename, .{}) catch |err| {
+        std.debug.print("Failed to open dump file: {}\n", .{err});
+        return err;
+    };
+    defer file.close();
+    
+    const file_size = file.getEndPos() catch |err| {
+        std.debug.print("Failed to get file size: {}\n", .{err});
+        return err;
+    };
+    
+    try std.testing.expectEqual(@as(u64, test_data.len), file_size);
+    
+    // Read file contents and verify they match
+    var buffer: [256]u8 = undefined;
+    const bytes_read = file.readAll(buffer[0..]) catch |err| {
+        std.debug.print("Failed to read file contents: {}\n", .{err});
+        return err;
+    };
+    
+    try std.testing.expectEqual(test_data.len, bytes_read);
+    try std.testing.expectEqualStrings(test_data, buffer[0..bytes_read]);
+    
+    // Clean up - delete the test file
+    std.fs.cwd().deleteFile(filename) catch |err| {
+        std.debug.print("Failed to delete test file: {}\n", .{err});
+        return err;
+    };
+    
+    std.debug.print("Dump functionality test completed\n", .{});
+}
+
+test "block logger dump functionality" {
+    std.debug.print("Testing block logger dump functionality...\n", .{});
+    
+    const test_data = "Block logger test data";
+    const filename = "test_block_dump.bin";
+    
+    // Create logger with block and dump data to file
+    const log = logger.new(.{ .tag = "block_test" });
+    const block = log.block("test_block");
+    block.dump(filename, test_data);
+    
+    // Verify file exists and has correct contents
+    const file = std.fs.cwd().openFile(filename, .{}) catch |err| {
+        std.debug.print("Failed to open block dump file: {}\n", .{err});
+        return err;
+    };
+    defer file.close();
+    
+    var buffer: [64]u8 = undefined;
+    const bytes_read = file.readAll(buffer[0..]) catch |err| {
+        std.debug.print("Failed to read block dump file: {}\n", .{err});
+        return err;
+    };
+    
+    try std.testing.expectEqual(test_data.len, bytes_read);
+    try std.testing.expectEqualStrings(test_data, buffer[0..bytes_read]);
+    
+    // Clean up
+    std.fs.cwd().deleteFile(filename) catch |err| {
+        std.debug.print("Failed to delete block test file: {}\n", .{err});
+        return err;
+    };
+    
+    std.debug.print("Block logger dump functionality test completed\n", .{});
+}

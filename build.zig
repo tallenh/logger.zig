@@ -1,5 +1,21 @@
 const std = @import("std");
 
+/// Helper function for consuming projects to easily add Zig Logger with Objective-C support
+pub fn addZigLoggerObjC(exe: *std.Build.Step.Compile, logger_dep: *std.Build.Dependency) void {
+    // Add the Zig module
+    exe.root_module.addImport("logger", logger_dep.module("logger"));
+    
+    // Link both libraries
+    exe.linkLibrary(logger_dep.artifact("zig-logger"));
+    exe.linkLibrary(logger_dep.artifact("zig-logger-objc"));
+    
+    // Add include path for headers
+    exe.addIncludePath(logger_dep.path("objc_bridge"));
+    
+    // Add system frameworks
+    exe.linkFramework("Foundation");
+}
+
 pub fn build(b: *std.Build) void {
     const target = b.standardTargetOptions(.{});
     const optimize = b.standardOptimizeOption(.{});
@@ -8,6 +24,61 @@ pub fn build(b: *std.Build) void {
     const logger_module = b.addModule("logger", .{
         .root_source_file = b.path("src/main.zig"),
     });
+
+    // Create a static library for C/Objective-C interop
+    const lib = b.addStaticLibrary(.{
+        .name = "zig-logger",
+        .root_source_file = b.path("src/main.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    
+    // Install the library and headers for dependency use
+    b.installArtifact(lib);
+    
+    // Install C header for Objective-C interop
+    const install_header = b.addInstallFile(
+        b.path("objc_bridge/zig_logger.h"),
+        "include/zig_logger.h"
+    );
+    b.getInstallStep().dependOn(&install_header.step);
+    
+    // Install Objective-C wrapper files
+    const install_objc_header = b.addInstallFile(
+        b.path("objc_bridge/ZigLogger.h"),
+        "include/ZigLogger.h"
+    );
+    const install_objc_impl = b.addInstallFile(
+        b.path("objc_bridge/ZigLogger.m"),
+        "src/ZigLogger.m"
+    );
+    b.getInstallStep().dependOn(&install_objc_header.step);
+    b.getInstallStep().dependOn(&install_objc_impl.step);
+    
+    // Create an Objective-C static library that includes the wrapper
+    const objc_lib = b.addStaticLibrary(.{
+        .name = "zig-logger-objc",
+        .target = target,
+        .optimize = optimize,
+    });
+    
+    // Add the Objective-C wrapper source to the library
+    objc_lib.addCSourceFile(.{
+        .file = b.path("objc_bridge/ZigLogger.m"),
+        .flags = &.{
+            "-fobjc-arc",
+            "-I", "objc_bridge",
+        },
+    });
+    
+    // Link with the main Zig library
+    objc_lib.linkLibrary(lib);
+    
+    // Add system frameworks
+    objc_lib.linkFramework("Foundation");
+    
+    // Install the Objective-C library
+    b.installArtifact(objc_lib);
 
     // Create a test step
     const main_tests = b.addTest(.{

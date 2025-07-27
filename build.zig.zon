@@ -9,6 +9,7 @@
         "build.zig",
         "build.zig.zon",
         "src",
+        "objc_bridge",
         "README.md",
     },
 

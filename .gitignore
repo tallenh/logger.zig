@@ -38,4 +38,18 @@ Desktop.ini
 
 # Test outputs
 test.log
-*.test 
+*.test
+
+# Objective-C bridge build artifacts
+objc_bridge/build/
+objc_bridge/*.o
+objc_bridge/test_app
+
+# Static libraries (generated)
+*.a
+libzig-logger.a
+
+# Clang/LLVM artifacts
+*.dSYM/
+*.bc
+*.ll 

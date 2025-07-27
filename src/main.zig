@@ -739,3 +739,43 @@ fn levelToLabel(level: LogLevel) []const u8 {
         .err => "ERROR",
     };
 }
+
+// =============================================================================
+// C API for Objective-C Interop
+// =============================================================================
+
+/// Create a new Logger with the given tag (C-compatible)
+export fn zig_logger_create(tag_cstr: [*:0]const u8, out_logger: *Logger) callconv(.C) void {
+    const tag = std.mem.span(tag_cstr);
+    out_logger.* = Logger.init(.{ .tag = tag });
+}
+
+/// Log an info message (C-compatible)
+export fn zig_logger_info(logger: *Logger, message_cstr: [*:0]const u8) callconv(.C) void {
+    const message = std.mem.span(message_cstr);
+    logger.info("{s}", .{message});
+}
+
+/// Log a warning message (C-compatible)
+export fn zig_logger_warn(logger: *Logger, message_cstr: [*:0]const u8) callconv(.C) void {
+    const message = std.mem.span(message_cstr);
+    logger.warn("{s}", .{message});
+}
+
+/// Log a debug message (C-compatible)
+export fn zig_logger_debug(logger: *Logger, message_cstr: [*:0]const u8) callconv(.C) void {
+    const message = std.mem.span(message_cstr);
+    logger.dbg("{s}", .{message});
+}
+
+/// Log an error message (C-compatible)
+export fn zig_logger_error(logger: *Logger, message_cstr: [*:0]const u8) callconv(.C) void {
+    const message = std.mem.span(message_cstr);
+    logger.err("{s}", .{message});
+}
+
+/// Log a fatal message and exit (C-compatible)
+export fn zig_logger_fatal(logger: *Logger, message_cstr: [*:0]const u8) callconv(.C) noreturn {
+    const message = std.mem.span(message_cstr);
+    logger.fatal("{s}", .{message});
+}
